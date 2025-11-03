@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">PhishGuard</string>
+    <string name="title_activity_main">PhishGuard</string>
+    <string name="package_name">com.project.phishguard</string>
+    <string name="custom_url_scheme">com.project.phishguard</string>
+</resources>

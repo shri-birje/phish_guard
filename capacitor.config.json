@@ -1,0 +1,10 @@
+{
+  "appId": "com.project.phishguard",
+  "appName": "PhishGuard",
+  "webDir": "web",
+  "bundledWebRuntime": false,
+  "server": {
+    "url": "https://your-flask-backend-url.com",
+    "cleartext": true
+  }
+}

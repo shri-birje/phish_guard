@@ -1,0 +1,17 @@
+{
+  "name": "phishguard",
+  "version": "1.0.0",
+  "description": "PhishGuard mobile app using Capacitor and Flask backend",
+  "main": "index.js",
+  "scripts": {
+    "build": "echo \"No frontend build step — using web/ folder directly\"",
+    "sync": "npx cap sync",
+    "android": "npx cap open android",
+    "release": "cd android && ./gradlew assembleRelease"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.4.4",
+    "@capacitor/cli": "^7.4.4",
+    "@capacitor/core": "^7.4.4"
+  }
+}
