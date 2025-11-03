@@ -1,0 +1,86 @@
+body {
+    font-family: 'Poppins', sans-serif;
+    background: linear-gradient(135deg, #001f3f, #003366);
+    color: #fff;
+    margin: 0;
+    padding: 0;
+    text-align: center;
+    height: 100vh;
+}
+
+header {
+    padding: 20px;
+    background: rgba(0, 0, 0, 0.3);
+}
+
+.logo {
+    width: 60px;
+    vertical-align: middle;
+}
+
+h1 {
+    margin: 10px 0 5px 0;
+    font-size: 28px;
+}
+
+p {
+    font-size: 14px;
+    color: #ccc;
+}
+
+main {
+    padding: 40px;
+}
+
+.input-section {
+    background: rgba(255, 255, 255, 0.1);
+    padding: 25px;
+    border-radius: 15px;
+    width: 60%;
+    margin: 0 auto;
+}
+
+#urlInput {
+    width: 70%;
+    padding: 10px;
+    border-radius: 8px;
+    border: none;
+    font-size: 16px;
+}
+
+button {
+    background-color: #00bcd4;
+    color: white;
+    padding: 10px 20px;
+    border: none;
+    border-radius: 8px;
+    margin-left: 10px;
+    cursor: pointer;
+    font-size: 16px;
+}
+
+button:hover {
+    background-color: #008c9e;
+}
+
+.result-section {
+    margin-top: 40px;
+}
+
+.result-box {
+    background: rgba(255, 255, 255, 0.2);
+    padding: 15px;
+    border-radius: 12px;
+    font-size: 18px;
+    display: inline-block;
+    width: 50%;
+    word-wrap: break-word;
+}
+
+footer {
+    position: absolute;
+    bottom: 10px;
+    width: 100%;
+    font-size: 13px;
+    color: #bbb;
+}

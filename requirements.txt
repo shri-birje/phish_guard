@@ -7,4 +7,3 @@ eventlet
 gunicorn
 joblib
 pandas
-scikit-learn
