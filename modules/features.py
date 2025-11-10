@@ -1,98 +1,138 @@
 # modules/features.py
 import re
+import urllib.parse
+from difflib import SequenceMatcher
 import math
-import idna
-import unicodedata
-from collections import Counter
 
-# simple Levenshtein (iterative)
-def levenshtein(a: str, b: str) -> int:
-    if a == b: return 0
-    la, lb = len(a), len(b)
-    if la == 0: return lb
-    if lb == 0: return la
-    prev = list(range(lb+1))
-    for i, ca in enumerate(a, start=1):
-        cur = [i] + [0]*lb
-        for j, cb in enumerate(b, start=1):
-            add = prev[j] + 1
-            delete = cur[j-1] + 1
-            change = prev[j-1] + (0 if ca==cb else 1)
-            cur[j] = min(add, delete, change)
-        prev = cur
-    return prev[lb]
-
-# punycode / ascii form
-def to_ascii(domain: str) -> str:
-    try:
-        return idna.encode(domain).decode()
-    except Exception:
-        return domain
-
-# character entropy
-def shannon_entropy(s: str) -> float:
-    if not s: return 0.0
-    counts = Counter(s)
-    probs = [c/len(s) for c in counts.values()]
-    return -sum(p*math.log2(p) for p in probs)
-
-# count non-ascii (unicode confusables)
-def count_non_ascii(s: str) -> int:
-    return sum(1 for ch in s if ord(ch) > 127)
-
-# common homoglyph substitution map (extend as needed)
-HOMOGLYPH_MAP = {
-    '0':'o', '1':'l', '3':'e', '4':'a', '5':'s', '7':'t', '8':'b',
-    'l':'1', 'o':'0', 'i':'1', 's':'5', 'a':'4'
+# small map of common homoglyphs -> latin approximations (extendable)
+CONFUSABLES = {
+    '\u0430':'a', '\u03B1':'a', '\u0435':'e', '\u03B5':'e', '\u043E':'o', '\u03BF':'o',
+    '\uFF4F':'o', '\u0131':'i', '\u0456':'i', '0':'o', '1':'l', 'l':'1'
 }
-def homoglyph_sub_count(domain: str) -> int:
-    c = 0
-    for ch in domain:
-        if ch.lower() in HOMOGLYPH_MAP:
-            c += 1
-    return c
 
-SUSPICIOUS_TLDS = {'.zip', '.top', '.xyz', '.country', '.info', '.icu', '.loan'}
+SUSPICIOUS_TLDS = {'.top', '.xyz', '.zip', '.tk', '.pw', '.info'}
+
+def extract_domain(url: str) -> str:
+    if not url:
+        return ''
+    if not re.match(r'https?://', url):
+        url = 'http://' + url
+    try:
+        p = urllib.parse.urlparse(url)
+        hostname = (p.hostname or '').lower()
+        return hostname
+    except Exception:
+        return url.lower()
+
+def normalize_confusables(s: str) -> str:
+    return ''.join([CONFUSABLES.get(ch, ch) for ch in s])
+
+def levenshtein(a: str, b: str) -> int:
+    """Simple Levenshtein distance (no extra dependencies)."""
+    if a == b:
+        return 0
+    if len(a) == 0:
+        return len(b)
+    if len(b) == 0:
+        return len(a)
+    v0 = list(range(len(b) + 1))
+    v1 = [0] * (len(b) + 1)
+    for i in range(len(a)):
+        v1[0] = i + 1
+        for j in range(len(b)):
+            cost = 0 if a[i] == b[j] else 1
+            v1[j+1] = min(v1[j] + 1, v0[j+1] + 1, v0[j] + cost)
+        v0, v1 = v1, v0
+    return v0[len(b)]
+
+def ratio(a: str, b: str) -> float:
+    return SequenceMatcher(None, a, b).ratio()
+
+def shannon_entropy(s: str) -> float:
+    if not s:
+        return 0.0
+    probs = [float(s.count(c)) / len(s) for c in set(s)]
+    return - sum(p * math.log2(p) for p in probs)
+
+def domain_sld_tld(domain: str):
+    """Return (sld, tld). sld = second-level domain (example from example.co.uk -> example.co)"""
+    if not domain:
+        return '', ''
+    parts = domain.split('.')
+    if len(parts) <= 1:
+        return domain, ''
+    # simple approach: last part is tld; sld = join(last two if country-code?) - keep simple:
+    tld = '.' + parts[-1]
+    sld = parts[-2]
+    return sld, tld
+
+def best_similarity_to_trusted(domain: str, trusted_list: list) -> float:
+    if not domain or not trusted_list:
+        return 0.0
+    best = 0.0
+    for t in trusted_list:
+        sim = ratio(domain, t)
+        if sim > best:
+            best = sim
+    return best
+
+def count_confusable_chars(s: str) -> int:
+    return sum(1 for ch in s if ch in CONFUSABLES and CONFUSABLES[ch] != ch)
 
 def extract_features_from_url(url: str, trusted_domains: list = None) -> dict:
     """
-    url: full url or domain (pass only hostname ideally)
-    trusted_domains: list of trusted canonical domains to compute distances to
-    returns: dict of numeric features
+    Returns a dict of numeric features extracted from URL/domain.
+    Keep keys stable (same names/order) so training/inference columns match.
     """
-    # normalize
-    host = url.lower().strip()
-    # remove protocol and path if present
-    host = re.sub(r'^https?://', '', host)
-    host = host.split('/')[0]
-    # remove port
-    host = host.split(':')[0]
+    trusted_domains = trusted_domains or []
+    domain = extract_domain(url)
+    sld, tld = domain_sld_tld(domain)
+    normalized = normalize_confusables(domain)
 
-    # domain parts
-    parts = host.split('.')
-    tld = '.' + parts[-1] if len(parts)>1 else ''
-    sld = parts[-2] if len(parts)>1 else parts[0]
-    ascii = to_ascii(host)
+    features = {}
+    # Basic counts & ratios
+    features['url_length'] = len(url or '')
+    features['domain_length'] = len(domain or '')
+    features['sld_length'] = len(sld or '')
+    features['num_dots'] = domain.count('.')
+    features['count_digits'] = sum(c.isdigit() for c in domain)
+    features['digit_ratio'] = features['count_digits'] / max(1.0, features['domain_length'])
+    features['count_letters'] = sum(c.isalpha() for c in domain)
+    features['count_special'] = sum(not c.isalnum() and c != '.' for c in domain)
 
-    feats = {}
-    feats['len_domain'] = len(host)
-    feats['num_parts'] = len(parts)
-    feats['tld_suspicious'] = 1 if tld in SUSPICIOUS_TLDS else 0
-    feats['non_ascii_count'] = count_non_ascii(host)
-    feats['homoglyph_subs'] = homoglyph_sub_count(host)
-    feats['punycode_diff'] = 1 if ascii != host else 0
-    feats['levenshtein_min_trusted'] = 999
-    feats['entropy'] = shannon_entropy(host)
-    feats['digit_ratio'] = sum(ch.isdigit() for ch in host)/max(1,len(host))
-    feats['alpha_ratio'] = sum(ch.isalpha() for ch in host)/max(1,len(host))
-    # optional: compare to a small list of well-known brands (trusted_domains)
-    if trusted_domains:
-        best = 999
-        for t in trusted_domains:
-            d = levenshtein(sld, t.split('.')[0])
-            if d < best: best = d
-        feats['levenshtein_min_trusted'] = best
-    else:
-        feats['levenshtein_min_trusted'] = 999
+    # Flags
+    features['has_https'] = 1 if url.lower().startswith('https') else 0
+    features['has_at'] = 1 if '@' in url else 0
+    features['has_hyphen'] = 1 if '-' in domain else 0
+    features['has_ip'] = 1 if re.match(r'^\d+\.\d+\.\d+\.\d+$', domain) else 0
+    features['unicode_chars'] = 1 if any(ord(c) > 127 for c in domain) else 0
 
-    return feats
+    # Homoglyph / confusable metrics
+    features['confusable_count'] = count_confusable_chars(domain)
+    features['normalized_equals_raw'] = 1 if normalized == domain else 0
+    features['normalized_length_diff'] = abs(len(normalized) - len(domain))
+
+    # similarity to trusted domains (best)
+    try:
+        features['best_sim_trusted_raw'] = best_similarity_to_trusted(domain, trusted_domains)
+        features['best_sim_trusted_norm'] = best_similarity_to_trusted(normalized, trusted_domains)
+    except Exception:
+        features['best_sim_trusted_raw'] = 0.0
+        features['best_sim_trusted_norm'] = 0.0
+
+    # Levenshtein to top trusted (min distance) - normalized by domain length
+    min_lev = min((levenshtein(domain, t) for t in (trusted_domains or [''])), default=len(domain))
+    features['min_lev_trusted_norm'] = min_lev / max(1, features['domain_length'])
+
+    # Suspicious TLD
+    features['suspicious_tld'] = 1 if (tld.lower() in SUSPICIOUS_TLDS) else 0
+
+    # entropy & char diversity
+    features['shannon_entropy'] = round(shannon_entropy(domain), 4)
+    features['unique_char_ratio'] = len(set(domain)) / max(1.0, features['domain_length'])
+
+    # Levenshtein/ratio to "popular" short names (optionally)
+    features['ratio_to_sld'] = ratio(domain, sld or domain)
+
+    # Return numeric-only dict (float/int)
+    return {k: float(v) if isinstance(v, (int, float)) else v for k, v in features.items()}

@@ -4,7 +4,6 @@ from flask_socketio import SocketIO, emit, join_room
 from flask_cors import CORS
 import pandas as pd
 import joblib
-from flask import send_from_directory
 
 # -------------------------
 # Flask & SocketIO setup
@@ -23,15 +22,27 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode=async_mode)
 # -------------------------
 # Load trained model
 # -------------------------
+model = None
+model_columns = None
+
 if os.path.exists(MODEL_PATH):
-    model = joblib.load(MODEL_PATH)
-    print("✅ AI Model Loaded Successfully!")
+    try:
+        saved = joblib.load(MODEL_PATH)
+        if isinstance(saved, dict) and 'model' in saved and 'columns' in saved:
+            model = saved['model']
+            model_columns = saved['columns']
+            print("✅ AI Model Loaded Successfully (with columns)!")
+        else:
+            model = saved
+            model_columns = None
+            print("⚠️ Model loaded without column info.")
+    except Exception as e:
+        print(f"❌ Error loading model: {e}")
 else:
-    model = None
     print("⚠️ Model file not found! Run train_model.py first.")
 
 # -------------------------
-# Database functions
+# Database setup
 # -------------------------
 def get_db():
     db = getattr(g, "_database", None)
@@ -70,22 +81,27 @@ def close_db(exc):
         db.close()
 
 # -------------------------
-# Frontend Routes
+# Frontend routes
 # -------------------------
 @app.route("/")
 def serve_index():
-    """Serve the main web UI"""
+    """Serve main frontend"""
     return send_from_directory(app.static_folder, "index.html")
 
 
 @app.route("/<path:path>")
 def serve_static_files(path):
-    """Serve other static assets (JS, CSS, etc.)"""
+    """Serve static assets"""
     return send_from_directory(app.static_folder, path)
 
 
+@app.route("/assets/<path:filename>")
+def serve_assets(filename):
+    """Serve logo and other images"""
+    return send_from_directory(os.path.join(app.static_folder, "assets"), filename)
+
 # -------------------------
-# AI-Powered Phishing Detection API
+# API Endpoint
 # -------------------------
 @app.route("/api/check", methods=["POST"])
 def api_check():
@@ -102,29 +118,38 @@ def api_check():
 
     from modules.homoglyph import analyze_homoglyph
     from modules.behavior import analyze_behavior
+    from modules.features import extract_features_from_url
 
     homoglyph_score = analyze_homoglyph(url, trusted)
     behavior_score = analyze_behavior(behavior)
 
+    # -------------------------
+    # Model inference
+    # -------------------------
     if model:
-        from modules.features import extract_features_from_url
-
         try:
             features = extract_features_from_url(url, trusted_domains=trusted)
-            feature_df = pd.DataFrame([features])
-            proba = model.predict_proba(feature_df)[0]
+            X_df = pd.DataFrame([features]).fillna(0)
 
-            # ✅ Handle both binary and single-class outputs
+            # ✅ Align columns to training columns
+            if model_columns:
+                for c in model_columns:
+                    if c not in X_df.columns:
+                        X_df[c] = 0.0
+                X_df = X_df[model_columns]
+
+            # Predict
+            proba = model.predict_proba(X_df)[0]
             if len(proba) == 1:
                 single_class = model.classes_[0]
                 probability = float(proba[0]) if single_class == 1 else 1 - float(proba[0])
             else:
                 probability = float(proba[1])
 
-            # Blend ML prediction with homoglyph analysis for smarter detection
+            # Blend ML prediction with homoglyph analysis
             phishing_score = round((probability * 0.7) + (homoglyph_score * 0.3), 2)
+            prediction = int(model.predict(X_df)[0])
 
-            prediction = int(model.predict(feature_df)[0])
             print(f"[DEBUG] ML prediction for {url}: {phishing_score}% (label={prediction})")
 
         except Exception as e:
@@ -135,6 +160,9 @@ def api_check():
         phishing_score = round(0.7 * homoglyph_score + 0.3 * behavior_score, 2)
         prediction = 1 if phishing_score >= 50 else 0
 
+    # -------------------------
+    # Risk classification
+    # -------------------------
     if phishing_score < 30:
         risk, action = "Low", "Allow"
     elif phishing_score < 70:
@@ -142,6 +170,9 @@ def api_check():
     else:
         risk, action = "High", "Block"
 
+    # -------------------------
+    # Log to DB
+    # -------------------------
     db = get_db()
     db.execute(
         "INSERT INTO logs (session_id, url, homoglyph_score, behavior_score, phishing_score, risk_level, ts) "
@@ -171,6 +202,9 @@ def api_check():
         )
         db.commit()
 
+    # -------------------------
+    # API Response
+    # -------------------------
     return jsonify(
         {
             "url": url,
@@ -181,7 +215,6 @@ def api_check():
             "action": action,
         }
     )
-
 
 # -------------------------
 # SocketIO Events
@@ -196,10 +229,6 @@ def on_join(data):
     room = data.get("room") or request.sid
     join_room(room)
     emit("joined", {"room": room}, room=request.sid)
-
-@app.route('/assets/<path:filename>')
-def serve_assets(filename):
-    return send_from_directory(os.path.join(app.static_folder, 'assets'), filename)
 
 # -------------------------
 # Run App (local & Render)
