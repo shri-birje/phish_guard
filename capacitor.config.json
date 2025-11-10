@@ -2,9 +2,6 @@
   "appId": "com.project.phishguard",
   "appName": "PhishGuard",
   "webDir": "web",
-  "bundledWebRuntime": false,
-  "server": {
-    "url": "https://phish-guard-3uvw.onrender.com",
-    "cleartext": true
-  }
+  "bundledWebRuntime": false
 }
+
