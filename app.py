@@ -4,6 +4,7 @@ from flask_socketio import SocketIO, emit, join_room
 from flask_cors import CORS
 import pandas as pd
 import joblib
+from flask import send_from_directory
 
 # -------------------------
 # Flask & SocketIO setup
@@ -120,7 +121,9 @@ def api_check():
             else:
                 probability = float(proba[1])
 
-            phishing_score = round(probability * 100, 2)
+            # Blend ML prediction with homoglyph analysis for smarter detection
+            phishing_score = round((probability * 0.7) + (homoglyph_score * 0.3), 2)
+
             prediction = int(model.predict(feature_df)[0])
             print(f"[DEBUG] ML prediction for {url}: {phishing_score}% (label={prediction})")
 
@@ -194,6 +197,9 @@ def on_join(data):
     join_room(room)
     emit("joined", {"room": room}, room=request.sid)
 
+@app.route('/assets/<path:filename>')
+def serve_assets(filename):
+    return send_from_directory(os.path.join(app.static_folder, 'assets'), filename)
 
 # -------------------------
 # Run App (local & Render)
