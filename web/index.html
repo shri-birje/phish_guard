@@ -1,45 +1,36 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI-Based Phishing Detection System</title>
-    <link rel="stylesheet" href="style.css">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PhishGuard</title>
+  <link rel="stylesheet" href="style.css" />
 </head>
-
 <body>
-    <header>
-        <img src="assets/logo.png" alt="Logo" class="logo">
-        <h1>AI-Powered Phishing Detection</h1>
-        <p>Homoglyph Detection + Human Behavior Profiling</p>
-    </header>
+  <header>
+    <img src="assets/logo.png" alt="Logo" class="logo" />
+    <h1>AI-Powered Phishing Detection</h1>
+    <p>Homoglyph Detection + Human Behavior Profiling</p>
+  </header>
 
-    <main>
-        <section class="input-section">
-            <h2>Check a Website for Phishing Risk</h2>
-            <input type="text" id="urlInput" placeholder="Enter a website URL (e.g., https://example.com)">
-            <div class="button-group">
-                <button onclick="checkPhishing()">Analyze</button>
-                <button id="blockBtn" style="display:none; background-color:#c0392b; color:white;"
-                    onclick="blockUrl()">Block URL</button>
-            </div>
-        </section>
+  <main>
+    <section class="input-section">
+      <h2>Check a Website for Phishing Risk</h2>
+      <input type="text" id="urlInput" placeholder="Enter website (https://example.com)" />
+      <button id="analyzeBtn">Analyze</button>
+      <button id="blockBtn" style="display:none" class="btn danger">Block URL</button>
+    </section>
 
-        <section class="result-section">
-            <h3>Result:</h3>
-            <div id="result" class="result-box">No input yet</div>
-            <button id="blockBtn" style="display:none" onclick="blockUrl()" class="btn btn-danger">Block URL</button>
-        </section>
+    <section class="result-section">
+      <h3>Result:</h3>
+      <div id="result" class="result-box">No input yet</div>
+    </section>
+  </main>
 
-    </main>
+  <footer>
+    <p>© 2025 AI Phishing Prevention | Homoglyph & Behavior Intelligence</p>
+  </footer>
 
-
-    <footer>
-        <p>© 2025 AI Phishing Prevention | Homoglyph & Behavior Intelligence</p>
-    </footer>
-
-    <script src="script.js" defer></script>
+  <script src="script.js"></script>
 </body>
-
 </html>

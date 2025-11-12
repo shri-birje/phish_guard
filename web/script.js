@@ -1,87 +1,78 @@
-async function checkPhishing() {
-    const urlInput = document.getElementById('urlInput').value;
-    const resultBox = document.getElementById('result');
+// web/script.js
+const API_BASE = (typeof API_BASE_OVERRIDE !== 'undefined') ? API_BASE_OVERRIDE : window.location.origin;
 
-    if (!urlInput) {
-        resultBox.textContent = "⚠️ Please enter a valid URL.";
-        return;
-    }
+const urlInput = document.getElementById('urlInput');
+const resultBox = document.getElementById('result');
+const analyzeBtn = document.getElementById('analyzeBtn');
+const blockBtn = document.getElementById('blockBtn');
 
-    resultBox.textContent = "🔍 Analyzing...";
-
-    try {
-        // ✅ Use the correct backend API endpoint:
-        const API_BASE = "https://phish-guard-3uvw.onrender.com";
-
-        const response = await fetch(`${API_BASE}/api/check`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: urlInput })
-        });
-        console.log("Sending request to:", `${API_BASE}/api/check`);
-
-        if (!response.ok) {
-            throw new Error(`Server responded with ${response.status}`);
-        }
-
-        const result = await response.json();
-
-        if (result.risk_level === "High" || result.prediction === "phishing") {
-            resultBox.style.background = "rgba(255, 0, 0, 0.4)";
-            resultBox.textContent = `🚨 Warning! The URL "${urlInput}" is likely a phishing domain.`;
-        } else {
-            resultBox.style.background = "rgba(0, 255, 0, 0.3)";
-            resultBox.textContent = `✅ Safe! The URL "${urlInput}" appears legitimate.`;
-        }
-
-    } catch (error) {
-        resultBox.style.background = "rgba(255, 165, 0, 0.3)";
-        resultBox.textContent = "❌ Error: Unable to connect to the backend.";
-        console.error("Connection error:", error);
-    }
-}
-const API_BASE = "https://phish-guard-3uvw.onrender.com";
-
-async function checkPhishing() {
-    const urlInput = document.getElementById('urlInput').value;
-    const resultBox = document.getElementById('result');
-    const blockBtn = document.getElementById('blockBtn');
-
-    if (!urlInput) {
-        resultBox.textContent = "⚠️ Please enter a valid URL.";
-        return;
-    }
-
-    resultBox.textContent = "🔍 Analyzing...";
-    blockBtn.style.display = "none";
-
-    try {
-        const response = await fetch(`${API_BASE}/api/check`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: urlInput })
-        });
-
-        const result = await response.json();
-        if (result.prediction === "phishing" || result.risk_level === "High") {
-            resultBox.style.background = "rgba(255, 0, 0, 0.4)";
-            resultBox.textContent = `🚨 Warning! "${urlInput}" is likely a phishing domain.`;
-            blockBtn.style.display = "block";
-        } else {
-            resultBox.style.background = "rgba(0, 255, 0, 0.3)";
-            resultBox.textContent = `✅ Safe! "${urlInput}" appears legitimate.`;
-        }
-    } catch (err) {
-        resultBox.textContent = "❌ Error connecting to backend.";
-    }
+function showResult(text, color='neutral') {
+  resultBox.style.background = (color === 'danger') ? 'rgba(255, 0, 0, 0.35)' : (color === 'warn' ? 'rgba(255,165,0,0.25)' : 'rgba(0,128,0,0.4)');
+  resultBox.textContent = text;
 }
 
-function blockUrl() {
-    const url = document.getElementById('urlInput').value;
-    fetch(`${API_BASE}/api/block`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, reason: "User manual block" })
+async function checkPhishing() {
+  const url = urlInput.value.trim();
+  if (!url) {
+    showResult("⚠️ Please enter a URL.", 'warn');
+    return;
+  }
+  showResult("🔍 Analyzing...", 'warn');
+  blockBtn.style.display = 'none';
+  try {
+    const resp = await fetch(`${API_BASE}/api/check`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url})
     });
-    alert(`🚫 URL "${url}" has been blocked.`);
+    if (!resp.ok) {
+      const txt = await resp.text();
+      showResult("❌ Server error: " + resp.status + " " + txt, 'danger');
+      return;
+    }
+    const data = await resp.json();
+    const score = data.phishing_score;
+    if (score === null || typeof score === 'undefined') {
+      showResult("❌ No score returned", 'danger');
+      return;
+    }
+    if (score >= 70) {
+      showResult(`🚨 Phishing likely (${score}%). The URL "${url}" is risky.`, 'danger');
+      blockBtn.style.display = 'inline-block';
+      blockBtn.onclick = () => blockUrl(url);
+    } else if (score >= 30) {
+      showResult(`⚠️ Suspicious (${score}%). Proceed carefully.`, 'warn');
+      blockBtn.style.display = 'inline-block';
+      blockBtn.onclick = () => blockUrl(url);
+    } else {
+      showResult(`✅ Safe! The URL "${url}" appears legitimate. (${score}%)`, 'safe');
+      blockBtn.style.display = 'none';
+    }
+  } catch (err) {
+    console.error(err);
+    showResult("❌ Error: Unable to contact backend. Is the server reachable?", 'danger');
+  }
 }
+
+async function blockUrl(url) {
+  if (!confirm("Block this URL globally?")) return;
+  try {
+    const resp = await fetch(`${API_BASE}/api/block`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url, reason: 'blocked via web UI'})
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      alert('Blocked: ' + url);
+      blockBtn.style.display = 'none';
+    } else {
+      alert('Error blocking: ' + JSON.stringify(data));
+    }
+  } catch (e) {
+    alert('Request failed: ' + e);
+  }
+}
+
+analyzeBtn.addEventListener('click', checkPhishing);
+urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') checkPhishing(); });

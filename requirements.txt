@@ -1,12 +1,10 @@
-Flask==2.3.2
-flask-socketio==5.3.3
 flask
 flask-socketio
 flask-cors
-gunicorn
-joblib
 pandas
+joblib
 scikit-learn
 idna
+python-whois
 gevent
-gevent-websocket
+requests
