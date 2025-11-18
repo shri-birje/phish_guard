@@ -15,6 +15,13 @@ from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
+
+# 🔥 TEMPORARY MIGRATION FIX — DELETE OLD DB ON RENDER
+if os.path.exists("phishing_logs.db"):
+    os.remove("phishing_logs.db")
+    print("🔥 Deleted old Render DB for migration")
+
+
 def init_db():
     conn = sqlite3.connect("phishing_logs.db")
     conn.execute("""
