@@ -1,6 +1,7 @@
 flask
 flask-socketio
 flask-cors
+flask-limiter
 pandas
 joblib
 scikit-learn
@@ -10,3 +11,7 @@ gevent
 requests
 gunicorn
 rapidfuzz
+PyJWT
+pyopenssl
+xgboost
+lightgbm

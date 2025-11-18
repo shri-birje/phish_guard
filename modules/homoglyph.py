@@ -8,6 +8,8 @@ try:
 except Exception:  # pragma: no cover
     fuzz = None
 
+from modules.unicode_utils import count_zero_width_chars, analyze_script_mix
+
 # small mapping of confusables (extend when needed)
 CONFUSABLES = {
     "\u0430": "a",
@@ -116,5 +118,17 @@ def analyze_homoglyph(url: str, trusted_domains: list) -> float:
     # normalized distance handled in features; here keep a small boost
     if sim_norm > 0.7 and sim_raw < 0.7:
         score += 10
+
+    zero_width = count_zero_width_chars(raw)
+    if zero_width:
+        score += min(25, zero_width * 12)
+
+    script_mix = analyze_script_mix(raw)
+    if script_mix.get("has_mixed_scripts"):
+        score += 15
+        if script_mix.get("mixed_latin_cyrillic"):
+            score += 15
+        if script_mix.get("mixed_latin_greek"):
+            score += 10
 
     return min(100.0, max(0.0, score))

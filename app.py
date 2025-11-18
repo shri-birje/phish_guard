@@ -3,12 +3,17 @@ import sqlite3
 import datetime
 import json
 import traceback
+from functools import wraps
 from urllib.parse import urlparse
+
+import jwt
+import pandas as pd
+import joblib
 from flask import Flask, request, g, jsonify, send_from_directory
 from flask_socketio import SocketIO, emit, join_room
 from flask_cors import CORS
-import pandas as pd
-import joblib
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 # Async mode: prefer gevent (Render / Linux). If unavailable fallback.
 async_mode = os.environ.get("ASYNC_MODE", "gevent")
@@ -18,15 +23,41 @@ MODEL_PATH = os.path.join(os.path.dirname(__file__), "rf_model.joblib")
 
 # Serve static frontend from 'web' directory
 app = Flask(__name__, static_folder="web", static_url_path="")
-CORS(app)
+allowed_origins = os.environ.get("CORS_ALLOW_ORIGINS", "*")
+cors_origins = [o.strip() for o in allowed_origins.split(",")] if allowed_origins != "*" else "*"
+CORS(
+    app,
+    resources={r"/api/*": {"origins": cors_origins}},
+    supports_credentials=True,
+    expose_headers=["Authorization"],
+)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "phishguard-final-secret")
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode=async_mode)
+
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=cors_origins if isinstance(cors_origins, list) else "*",
+    async_mode=async_mode,
+)
+
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[os.environ.get("DEFAULT_RATE_LIMIT", "120 per minute")],
+    storage_uri=os.environ.get("RATE_LIMIT_STORAGE_URI", "memory://"),
+)
+
+CHECK_RATE_LIMIT = os.environ.get("CHECK_RATE_LIMIT", "40/minute")
+ADMIN_RATE_LIMIT = os.environ.get("ADMIN_RATE_LIMIT", "20/minute")
+API_JWT_SECRET = os.environ.get("API_JWT_SECRET")
+API_JWT_AUDIENCE = os.environ.get("API_JWT_AUDIENCE", "phishguard-api")
+API_JWT_ALGO = os.environ.get("API_JWT_ALGO", "HS256")
 
 # -------------------------
 # Load model if present (support model saved as dict{'model','columns'})
 # -------------------------
 model = None
 model_columns = None
+model_feature_version = None
 
 if os.path.exists(MODEL_PATH):
     try:
@@ -34,7 +65,10 @@ if os.path.exists(MODEL_PATH):
         if isinstance(saved, dict) and "model" in saved and "columns" in saved:
             model = saved["model"]
             model_columns = saved["columns"]
+            model_feature_version = saved.get("feature_version")
             print("✅ AI Model Loaded Successfully (with columns)!")
+            if model_feature_version is not None:
+                print(f"ℹ️ Model feature version: {model_feature_version}")
         else:
             model = saved
             model_columns = None
@@ -44,6 +78,12 @@ if os.path.exists(MODEL_PATH):
         traceback.print_exc()
 else:
     print("⚠️ Model file not found. Run train_model.py to create rf_model.joblib")
+
+if model_feature_version and model_feature_version != FEATURE_VERSION:
+    print(
+        f"⚠️ Feature version mismatch detected (model={model_feature_version}, runtime={FEATURE_VERSION}). "
+        "Please retrain the model to avoid column drift."
+    )
 
 # -------------------------
 # DB helpers & migrations
@@ -134,7 +174,7 @@ def serve_assets(filename):
 # -------------------------
 from modules.homoglyph import analyze_homoglyph, fuzzy_confusable_score
 from modules.behavior import analyze_behavior  # keep your existing behavior analyzer
-from modules.features import extract_features_from_url
+from modules.features import extract_features_from_url, FEATURE_VERSION, FEATURE_DEFAULTS
 from modules.blacklist import (
     is_blacklisted as file_blacklist_contains,
     add_to_blacklist as add_domain_to_file_blacklist,
@@ -155,10 +195,30 @@ def normalize_domain(url: str) -> str:
     except Exception:
         return candidate.split("/")[0].split(":")[0].lower()
 
+
+def require_jwt(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not API_JWT_SECRET:
+            return fn(*args, **kwargs)
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.lower().startswith("bearer "):
+            return jsonify({"ok": False, "error": "missing bearer token"}), 401
+        token = auth_header.split(" ", 1)[1].strip()
+        try:
+            payload = jwt.decode(token, API_JWT_SECRET, algorithms=[API_JWT_ALGO], audience=API_JWT_AUDIENCE)
+            g.jwt_payload = payload
+        except jwt.PyJWTError as exc:
+            return jsonify({"ok": False, "error": f"invalid token: {exc}"}), 401
+        return fn(*args, **kwargs)
+
+    return wrapper
+
 # -------------------------
 # API: Check URL
 # -------------------------
 @app.route("/api/check", methods=["POST"])
+@limiter.limit(CHECK_RATE_LIMIT)
 def api_check():
     data = request.json or {}
     url = data.get("url", "")
@@ -192,18 +252,19 @@ def api_check():
     behavior_pct = min(100.0, max(0.0, behavior_score))
     fuzzy_pct = min(100.0, max(0.0, fuzzy_score))
 
-    features = {
-        "fuzzy_confusable_score": fuzzy_pct,
-        "homoglyph_score": glyph_score,
-        "behavior_score": behavior_pct,
-    }
+    try:
+        base_features = extract_features_from_url(url, trusted_domains=trusted, enable_network_enrichment=True)
+    except Exception as exc:
+        print("[WARN] feature extraction error:", exc)
+        base_features = dict(FEATURE_DEFAULTS)
+
+    features = dict(base_features)
     phishing_score = None
     prediction = None
 
     if model:
         try:
-            features = extract_features_from_url(url, trusted_domains=trusted)
-            X_df = pd.DataFrame([features]).fillna(0)
+            X_df = pd.DataFrame([base_features]).fillna(0)
 
             # align to training columns if available
             if model_columns:
@@ -315,6 +376,8 @@ def api_check():
 # API: Block / Unblock URL (blacklist)
 # -------------------------
 @app.route("/api/block", methods=["POST"])
+@require_jwt
+@limiter.limit(ADMIN_RATE_LIMIT)
 def api_block():
     data = request.json or {}
     url = data.get("url", "")
@@ -335,6 +398,8 @@ def api_block():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route("/api/unblock", methods=["POST"])
+@require_jwt
+@limiter.limit(ADMIN_RATE_LIMIT)
 def api_unblock():
     data = request.json or {}
     url = data.get("url", "")
@@ -351,6 +416,8 @@ def api_unblock():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route("/api/blacklist")
+@require_jwt
+@limiter.limit(ADMIN_RATE_LIMIT)
 def api_blacklist():
     db = get_db()
     cur = db.execute("SELECT url, reason, ts FROM blacklist ORDER BY id DESC")
@@ -361,9 +428,12 @@ def api_blacklist():
 # Optional debug endpoint to inspect features (helps debugging on Render)
 # -------------------------
 @app.route("/api/debug_features", methods=["POST"])
+@require_jwt
+@limiter.limit(ADMIN_RATE_LIMIT)
 def api_debug_features():
     data = request.json or {}
     url = data.get("url", "")
+    include_network = bool(data.get("include_network_signals", True))
     trusted = []
     trusted_path = os.path.join(os.path.dirname(__file__), "trusted_domains.txt")
     try:
@@ -371,7 +441,7 @@ def api_debug_features():
             trusted = [x.strip() for x in f if x.strip()]
     except Exception:
         trusted = []
-    features = extract_features_from_url(url, trusted_domains=trusted)
+    features = extract_features_from_url(url, trusted_domains=trusted, enable_network_enrichment=include_network)
     model_present = model is not None
     model_cols_present = model_columns is not None
     proba = None
@@ -388,7 +458,18 @@ def api_debug_features():
             prob_class1 = float(proba[1]) if len(proba) > 1 else None
     except Exception as e:
         proba = str(e)
-    return jsonify({"url": url, "features": features, "model_loaded": bool(model), "model_columns_present": bool(model_columns), "predict_proba": proba, "probability_class1": prob_class1})
+    return jsonify(
+        {
+            "url": url,
+            "features": features,
+            "model_loaded": bool(model),
+            "model_columns_present": bool(model_columns),
+            "runtime_feature_version": FEATURE_VERSION,
+            "model_feature_version": model_feature_version,
+            "predict_proba": proba,
+            "probability_class1": prob_class1,
+        }
+    )
 
 # -------------------------
 # SocketIO (kept minimal)
@@ -408,5 +489,5 @@ def on_join(data):
 # -------------------------
 if __name__ == "__main__":
     print("⚙️ Using async mode:", async_mode)
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 5001))
     socketio.run(app, host="0.0.0.0", port=port)

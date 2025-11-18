@@ -10,6 +10,8 @@ from sklearn.metrics import classification_report, accuracy_score
 import joblib
 from datetime import datetime, timedelta
 
+from modules.features import FEATURE_DEFAULTS, FEATURE_VERSION
+
 DB = os.path.join(os.path.dirname(__file__), "phishing_logs.db")
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "rf_model.joblib")
 
@@ -17,6 +19,7 @@ MODEL_PATH = os.path.join(os.path.dirname(__file__), "rf_model.joblib")
 MIN_NEW_EXAMPLES = 20  # retrain only when at least this many labeled examples available
 TEST_SIZE = 0.2
 RANDOM_STATE = 42
+FEATURE_COLUMNS = list(FEATURE_DEFAULTS.keys())
 
 def fetch_labeled_examples(conn):
     # this expects that logs.features_json contains a dict including a numeric 'label' field
@@ -43,19 +46,27 @@ def fetch_labeled_examples(conn):
     return data
 
 def prepare_dataset(data):
-    # build X, y from data list
     feature_rows = []
     labels = []
     for url, feats, label in data:
-        # remove non-numeric or nested fields
-        clean = {k: (v if isinstance(v, (int,float)) else (float(v) if isinstance(v, bool) else None)) for k,v in feats.items() if isinstance(v,(int,float,bool))}
-        if not clean:
-            continue
-        feature_rows.append(clean)
+        row = {}
+        for col in FEATURE_COLUMNS:
+            val = feats.get(col, 0)
+            if isinstance(val, bool):
+                row[col] = float(val)
+            elif isinstance(val, (int, float)):
+                row[col] = val
+            else:
+                try:
+                    row[col] = float(val)
+                except (TypeError, ValueError):
+                    row[col] = 0
+        feature_rows.append(row)
         labels.append(label)
     if not feature_rows:
         return None, None
     X = pd.DataFrame(feature_rows).fillna(0)
+    X = X[FEATURE_COLUMNS]
     y = np.array(labels)
     return X, y
 
@@ -66,7 +77,7 @@ def train_and_save(X, y):
     y_pred = model.predict(X_test)
     print("Accuracy:", accuracy_score(y_test, y_pred))
     print(classification_report(y_test, y_pred))
-    joblib.dump({"model": model, "columns": list(X.columns)}, MODEL_PATH)
+    joblib.dump({"model": model, "columns": list(X.columns), "feature_version": FEATURE_VERSION}, MODEL_PATH)
     print("💾 Saved model to", MODEL_PATH)
 
 def main():
