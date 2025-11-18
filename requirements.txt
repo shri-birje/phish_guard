@@ -9,3 +9,4 @@ python-whois
 gevent
 requests
 gunicorn
+rapidfuzz

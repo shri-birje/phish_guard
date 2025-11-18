@@ -3,35 +3,90 @@ import re
 from difflib import SequenceMatcher
 import urllib.parse
 
+try:
+    from rapidfuzz import fuzz
+except Exception:  # pragma: no cover
+    fuzz = None
+
 # small mapping of confusables (extend when needed)
 CONFUSABLES = {
-    '\u0430':'a','\u03B1':'a','\u0435':'e','\u03B5':'e',
-    '\u043E':'o','\u03BF':'o','\uFF4F':'o','\u0131':'i',
-    '\u0456':'i','0':'o','1':'l'
+    "\u0430": "a",
+    "\u03B1": "a",
+    "\u0435": "e",
+    "\u03B5": "e",
+    "\u043E": "o",
+    "\u03BF": "o",
+    "\uFF4F": "o",
+    "\u0131": "i",
+    "\u0456": "i",
+    "0": "o",
+    "1": "l",
 }
 
+
 def normalize_confusables(s: str) -> str:
-    return ''.join([CONFUSABLES.get(ch, ch) for ch in s])
+    return "".join([CONFUSABLES.get(ch, ch) for ch in s])
+
 
 def extract_domain(url: str) -> str:
-    if not url: return ''
-    if not re.match(r'https?://', url):
-        url = 'http://' + url
+    if not url:
+        return ""
+    if not re.match(r"https?://", url):
+        url = "http://" + url
     try:
         p = urllib.parse.urlparse(url)
-        return (p.hostname or '').lower()
+        return (p.hostname or "").lower()
     except Exception:
         return url.lower()
+
 
 def best_similarity(a: str, b_list: list) -> float:
     best = 0.0
     for t in b_list:
         try:
             r = SequenceMatcher(None, a, t).ratio()
-            if r > best: best = r
+            if r > best:
+                best = r
         except Exception:
             pass
     return best
+
+
+def _fuzzy_ratio(a: str, b: str) -> float:
+    if fuzz:
+        return max(fuzz.ratio(a, b), fuzz.partial_ratio(a, b))
+    return SequenceMatcher(None, a, b).ratio() * 100
+
+
+def fuzzy_confusable_score(url: str, trusted_domains: list) -> float:
+    """
+    Returns 0-100 score indicating if url is a fuzzy/confusable variation of trusted domains.
+    Higher ratios (>=80) trigger stronger penalties, especially if unicode is present.
+    """
+    domain = extract_domain(url)
+    if not domain or not trusted_domains:
+        return 0.0
+    if domain in trusted_domains:
+        return 0.0
+
+    best_ratio = 0.0
+    for trusted in trusted_domains:
+        trusted = trusted.lower()
+        try:
+            ratio = _fuzzy_ratio(domain, trusted)
+            if ratio > best_ratio:
+                best_ratio = ratio
+        except Exception:
+            continue
+
+    if best_ratio < 80:
+        return 0.0
+
+    penalty = (best_ratio - 80) * 2.5  # 50 at 100% similarity
+    if any(ord(c) > 127 for c in domain):
+        penalty += 10
+    return min(100.0, max(0.0, penalty))
+
 
 def analyze_homoglyph(url: str, trusted_domains: list) -> float:
     domain = extract_domain(url)

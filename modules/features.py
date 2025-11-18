@@ -5,6 +5,12 @@ import idna
 import unicodedata
 from collections import Counter
 import datetime
+from difflib import SequenceMatcher
+
+try:
+    from rapidfuzz import fuzz
+except Exception:  # pragma: no cover
+    fuzz = None
 
 # optional whois import (may fail if system cannot resolve whois)
 try:
@@ -136,18 +142,20 @@ def extract_features_from_url(url: str, trusted_domains: list = None) -> dict:
     if trusted_domains:
         best_sim_norm = 0.0
         best_sim_raw = 0.0
+        best_fuzzy = 0.0
         min_lev = 999
         raw = host
-        # create a simple normalized form that maps some confusables to ascii
+
         def normalize_confusables(s):
             mapping = {'\u0430':'a','\u03B1':'a','\u0435':'e','\u03B5':'e','\u043E':'o','\u03BF':'o','\uFF4F':'o','\u0131':'i','\u0456':'i','0':'o','1':'l'}
             return ''.join([mapping.get(ch, ch) for ch in s])
+
         norm = normalize_confusables(raw)
+
         for t in trusted_domains:
-            t_sld = t.split('.')[0].lower()
-            # similarity via ratio
+            target = (t or "").split('/')[0].split(':')[0].lower()
+            t_sld = target.split('.')[0] if target else ""
             try:
-                from difflib import SequenceMatcher
                 sim_norm = SequenceMatcher(None, norm, t_sld).ratio()
                 sim_raw = SequenceMatcher(None, raw, t_sld).ratio()
                 if sim_norm > best_sim_norm:
@@ -162,12 +170,24 @@ def extract_features_from_url(url: str, trusted_domains: list = None) -> dict:
                     min_lev = d
             except Exception:
                 pass
+            try:
+                if fuzz:
+                    ratio = max(fuzz.ratio(raw, target), fuzz.partial_ratio(raw, target))
+                else:
+                    ratio = SequenceMatcher(None, raw, target).ratio() * 100
+                if ratio > best_fuzzy:
+                    best_fuzzy = ratio
+            except Exception:
+                pass
+
         feats['best_sim_trusted_norm'] = round(best_sim_norm, 4)
         feats['best_sim_trusted_raw'] = round(best_sim_raw, 4)
         feats['min_lev_trusted'] = min_lev if min_lev != 999 else -1
+        feats['best_fuzzy_ratio'] = round(best_fuzzy, 2)
     else:
         feats['best_sim_trusted_norm'] = 0.0
         feats['best_sim_trusted_raw'] = 0.0
         feats['min_lev_trusted'] = -1
+        feats['best_fuzzy_ratio'] = 0.0
 
     return feats
