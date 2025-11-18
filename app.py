@@ -1,4 +1,14 @@
 import os
+
+# 🔥 TEMP FIX: Delete old DB on Render
+db_path = "/opt/render/project/src/phishing_logs.db"
+
+if os.path.exists(db_path):
+    os.remove(db_path)
+    print("🔥 Deleted old Render DB at:", db_path)
+else:
+    print("ℹ No existing DB found at startup")
+
 import sqlite3
 import datetime
 import json
