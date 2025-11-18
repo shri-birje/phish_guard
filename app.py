@@ -15,6 +15,27 @@ from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
+def init_db():
+    conn = sqlite3.connect("phishing_logs.db")
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        url TEXT,
+        prediction INTEGER,
+        probability REAL,
+        homoglyph_score REAL,
+        model_raw_probability REAL,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        features_json TEXT
+    );
+    """)
+    conn.commit()
+    conn.close()
+    print("✔ logs table ensured")
+
+init_db()
+
+
 # Async mode: prefer gevent (Render / Linux). If unavailable fallback.
 async_mode = os.environ.get("ASYNC_MODE", "gevent")
 
