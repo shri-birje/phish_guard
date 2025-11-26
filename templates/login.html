@@ -208,10 +208,9 @@
           localStorage.setItem("phishguard_email", result.email || email);
         }
 
-        // Optional: redirect after short delay, e.g. to your main UI or admin logs
+        // Redirect back to main search UI after short delay
         setTimeout(() => {
-          // For now, just go to admin logs if exists
-          window.location.href = "/admin/logs";
+          window.location.href = "/";
         }, 600);
       } catch (err) {
         statusEl.classList.remove("text-success");

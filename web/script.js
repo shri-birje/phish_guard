@@ -88,20 +88,46 @@ async function checkPhishing() {
 }
 
 async function blockUrl(url) {
-  if (!confirm("Block this URL globally?")) return;
+  // Fallback to current input if url param missing
+  const target = (url || urlInput.value || '').trim();
+  if (!target) {
+    alert("No URL to block.");
+    return;
+  }
+
+  if (!confirm(`Block "${target}" globally?`)) return;
+
+  const token = localStorage.getItem('phishguard_token');
+  if (!token) {
+    alert("You must log in first to block URLs.\nGo to /login, sign in, then try again.");
+    return;
+  }
+
   try {
     const resp = await fetch(`${API_BASE}/api/block`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, reason: 'blocked via web UI' })
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + token
+      },
+      body: JSON.stringify({ url: target, reason: 'blocked via web UI' })
     });
-    const data = await resp.json();
-    if (data.ok) {
-      alert('Blocked: ' + url);
-      blockBtn.style.display = 'none';
-    } else {
-      alert('Error blocking: ' + JSON.stringify(data));
+
+    let data;
+    try {
+      data = await resp.json();
+    } catch (_) {
+      data = {};
     }
+
+    if (!resp.ok || data.ok === false) {
+      const msg = (data && data.error) ? data.error : (`HTTP ${resp.status}`);
+      alert('Error blocking: ' + msg);
+      return;
+    }
+
+    alert('Blocked: ' + (data.url || target));
+    blockBtn.style.display = 'none';
   } catch (e) {
     alert('Request failed: ' + e);
   }
