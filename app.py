@@ -5,7 +5,7 @@ import json
 import traceback
 from functools import wraps
 from urllib.parse import urlparse
-from collections import Counter  # NEW: used for risk stats in admin dashboard
+from collections import Counter
 
 import jwt
 import pandas as pd
@@ -15,6 +15,7 @@ from flask_socketio import SocketIO, emit, join_room
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from werkzeug.security import generate_password_hash, check_password_hash  # NEW: password hashing
 
 # -------------------------
 # Import analysis modules
@@ -77,10 +78,13 @@ API_JWT_ALGO = os.environ.get("API_JWT_ALGO", "HS256")
 # -------------------------
 def init_db():
     """
-    Ensure DB exists with the schema expected by api_check() inserts.
+    Ensure DB exists with the schema expected by api_check() inserts
+    and the new 'users' table for auth.
     """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+
+    # Logs table
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS logs (
@@ -96,6 +100,8 @@ def init_db():
         )
         """
     )
+
+    # Alerts table
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS alerts (
@@ -108,6 +114,8 @@ def init_db():
         )
         """
     )
+
+    # Blacklist table
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS blacklist (
@@ -118,6 +126,19 @@ def init_db():
         )
         """
     )
+
+    # NEW: Users table for authentication
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE,
+            password_hash TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
     print("✔ DB & tables ensured at", DB_PATH)
@@ -232,11 +253,15 @@ def normalize_domain(url: str) -> str:
         return candidate.split("/")[0].split(":")[0].lower()
 
 
+def _get_jwt_secret():
+    # Use explicit API_JWT_SECRET if set, else fall back to Flask SECRET_KEY
+    return API_JWT_SECRET or app.config["SECRET_KEY"]
+
+
 def require_jwt(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        if not API_JWT_SECRET:
-            return fn(*args, **kwargs)
+        secret = _get_jwt_secret()
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.lower().startswith("bearer "):
             return jsonify({"ok": False, "error": "missing bearer token"}), 401
@@ -244,7 +269,7 @@ def require_jwt(fn):
         try:
             payload = jwt.decode(
                 token,
-                API_JWT_SECRET,
+                secret,
                 algorithms=[API_JWT_ALGO],
                 audience=API_JWT_AUDIENCE,
             )
@@ -256,13 +281,36 @@ def require_jwt(fn):
     return wrapper
 
 
+def maybe_get_jwt_user_id() -> str | None:
+    """
+    Optional helper: if Authorization: Bearer <token> is present,
+    decode it and return the user id (sub). If anything fails,
+    return None and let other mechanisms handle user_id.
+    """
+    secret = _get_jwt_secret()
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.lower().startswith("bearer "):
+        return None
+    token = auth_header.split(" ", 1)[1].strip()
+    try:
+        payload = jwt.decode(
+            token,
+            secret,
+            algorithms=[API_JWT_ALGO],
+            audience=API_JWT_AUDIENCE,
+        )
+        return str(payload.get("sub") or "")
+    except jwt.PyJWTError:
+        return None
+
+
 def get_user_id_from_request(data: dict) -> str:
     """
-    Option B: client sends its own user_id.
+    Fallback: client sends its own user_id / session_id.
 
     We support:
-      - JSON body: data["user_id"] (preferred)
-      - JSON body: data["session_id"] (fallback)
+      - JSON body: data["user_id"]
+      - JSON body: data["session_id"]
       - Header:    X-User-Id
       - Fallback:  remote_addr
     """
@@ -277,6 +325,147 @@ def get_user_id_from_request(data: dict) -> str:
 
 
 # -------------------------
+# Auth: Register / Login / My Logs
+# -------------------------
+@app.route("/api/register", methods=["POST"])
+def api_register():
+    """
+    Register a new user account.
+    Request JSON: { "email": "...", "password": "..." }
+    """
+    data = request.json or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+
+    if not email or not password:
+        return jsonify({"ok": False, "error": "email and password are required"}), 400
+
+    if len(password) < 6:
+        return jsonify({"ok": False, "error": "password must be at least 6 characters"}), 400
+
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT id FROM users WHERE email = ?", (email,))
+        existing = cur.fetchone()
+        if existing:
+            return jsonify({"ok": False, "error": "email already registered"}), 400
+
+        pwd_hash = generate_password_hash(password)
+        cur.execute(
+            "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
+            (email, pwd_hash, datetime.datetime.utcnow().isoformat()),
+        )
+        db.commit()
+        user_id = cur.lastrowid
+    except Exception as e:
+        print("register error:", e)
+        return jsonify({"ok": False, "error": "internal error"}), 500
+
+    # Optionally issue token on register
+    secret = _get_jwt_secret()
+    payload = {
+        "sub": str(user_id),
+        "email": email,
+        "role": "user",
+        "aud": API_JWT_AUDIENCE,
+        "iat": datetime.datetime.utcnow(),
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(days=7),
+    }
+    token = jwt.encode(payload, secret, algorithm=API_JWT_ALGO)
+
+    return jsonify({"ok": True, "token": token, "user_id": user_id, "email": email})
+
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    """
+    Log in a user.
+    Request JSON: { "email": "...", "password": "..." }
+    Returns JWT token.
+    """
+    data = request.json or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+
+    if not email or not password:
+        return jsonify({"ok": False, "error": "email and password are required"}), 400
+
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT id, password_hash FROM users WHERE email = ?", (email,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": "invalid credentials"}), 401
+
+        user_id, pwd_hash = row
+        if not check_password_hash(pwd_hash, password):
+            return jsonify({"ok": False, "error": "invalid credentials"}), 401
+    except Exception as e:
+        print("login error:", e)
+        return jsonify({"ok": False, "error": "internal error"}), 500
+
+    secret = _get_jwt_secret()
+    payload = {
+        "sub": str(user_id),
+        "email": email,
+        "role": "user",
+        "aud": API_JWT_AUDIENCE,
+        "iat": datetime.datetime.utcnow(),
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(days=7),
+    }
+    token = jwt.encode(payload, secret, algorithm=API_JWT_ALGO)
+
+    return jsonify({"ok": True, "token": token, "user_id": user_id, "email": email})
+
+
+@app.route("/api/my_logs", methods=["GET"])
+@require_jwt
+def api_my_logs():
+    """
+    Return last N logs for the currently authenticated user.
+    Uses session_id == user_id from JWT (sub).
+    """
+    payload = getattr(g, "jwt_payload", None)
+    if not payload:
+        return jsonify({"ok": False, "error": "no auth payload"}), 401
+
+    user_id = str(payload.get("sub") or "")
+    if not user_id:
+        return jsonify({"ok": False, "error": "invalid token (no sub)"}), 401
+
+    db = get_db()
+    cur = db.execute(
+        """
+        SELECT url, phishing_score, risk_level, ts
+        FROM logs
+        WHERE session_id = ?
+        ORDER BY id DESC
+        LIMIT 200
+        """,
+        (user_id,),
+    )
+    rows = cur.fetchall()
+    logs = [
+        {
+            "url": r[0],
+            "phishing_score": float(r[1] or 0.0),
+            "risk_level": r[2] or "Unknown",
+            "ts": r[3],
+        }
+        for r in rows
+    ]
+    return jsonify({"ok": True, "logs": logs})
+
+
+# Optional: pretty login page (HTML)
+@app.route("/login")
+def login_page():
+    return render_template("login.html")
+
+
+# -------------------------
 # API: Check URL
 # -------------------------
 @app.route("/api/check", methods=["POST"])
@@ -285,7 +474,13 @@ def api_check():
     data = request.json or {}
     url = data.get("url", "")
     behavior_raw = data.get("behavior", {}) or {}
-    user_id = get_user_id_from_request(data)
+
+    # Prefer JWT user id (if Authorization header provided), else fallback
+    jwt_user_id = maybe_get_jwt_user_id()
+    if jwt_user_id:
+        user_id = jwt_user_id
+    else:
+        user_id = get_user_id_from_request(data)
 
     # load trusted domains
     trusted = []
@@ -414,7 +609,6 @@ def api_check():
         phishing_score = max(phishing_score, 80.0)
 
     # 2) Brand misused in subdomain with decent model prob → bump to High
-    #    (lowered threshold: prob >= 0.6)
     if brand_mismatch >= 1.0 and prob >= 0.6:
         phishing_score = max(phishing_score, 85.0)
 
