@@ -5,11 +5,12 @@ import json
 import traceback
 from functools import wraps
 from urllib.parse import urlparse
+from collections import Counter  # NEW: used for risk stats in admin dashboard
 
 import jwt
 import pandas as pd
 import joblib
-from flask import Flask, request, g, jsonify, send_from_directory
+from flask import Flask, request, g, jsonify, send_from_directory, render_template
 from flask_socketio import SocketIO, emit, join_room
 from flask_cors import CORS
 from flask_limiter import Limiter
@@ -609,6 +610,67 @@ def api_debug_features():
             "probability_class1": prob_class1,
         }
     )
+
+
+# -------------------------
+# Admin dashboard views (logs + blacklist)
+# -------------------------
+@app.route("/admin/logs")
+def admin_logs():
+    """
+    Simple admin dashboard:
+      - Show last 200 scans (logs table)
+      - Show a bar chart of counts by risk level (Low/Medium/High)
+    """
+    db = get_db()
+    cur = db.execute(
+        "SELECT session_id, url, phishing_score, risk_level, ts "
+        "FROM logs ORDER BY id DESC LIMIT 200"
+    )
+    rows = cur.fetchall()
+
+    logs = [
+        {
+            "session_id": r[0],
+            "url": r[1],
+            "phishing_score": round(r[2] or 0.0, 2),
+            "risk_level": r[3] or "Unknown",
+            "ts": r[4],
+        }
+        for r in rows
+    ]
+
+    total_logs = len(logs)
+    risk_counts = Counter(log["risk_level"] for log in logs)
+    risk_labels = list(risk_counts.keys())
+    risk_values = [risk_counts[label] for label in risk_labels]
+
+    return render_template(
+        "admin_logs.html",
+        logs=logs,
+        total_logs=total_logs,
+        risk_labels=json.dumps(risk_labels),
+        risk_values=json.dumps(risk_values),
+    )
+
+
+@app.route("/admin/blacklist")
+def admin_blacklist():
+    """
+    Show all blocked/blacklisted domains from the blacklist table.
+    """
+    db = get_db()
+    cur = db.execute("SELECT url, reason, ts FROM blacklist ORDER BY id DESC")
+    rows = cur.fetchall()
+    entries = [
+        {
+            "url": r[0],
+            "reason": r[1] or "",
+            "ts": r[2],
+        }
+        for r in rows
+    ]
+    return render_template("admin_blacklist.html", entries=entries)
 
 
 # -------------------------
