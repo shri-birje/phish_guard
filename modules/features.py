@@ -359,13 +359,34 @@ def _script_mix_stats(host: str) -> dict:
         "mixed_latin_greek": float(mix.get("mixed_latin_greek", 0)),
     }
 
-
 def _parse_host_parts(host: str):
     """
     Use tldextract to split host into (subdomain, domain, suffix).
+
+    On any error (including RecursionError in some environments),
+    fall back to a simple split, so feature extraction NEVER crashes.
     """
-    ext = tldextract.extract(host)
-    return ext.subdomain or "", ext.domain or "", ext.suffix or ""
+    if not host:
+        return "", "", ""
+
+    try:
+        ext = tldextract.extract(host)
+        subdomain = ext.subdomain or ""
+        domain = ext.domain or ""
+        suffix = ext.suffix or ""
+        return subdomain, domain, suffix
+    except Exception:
+        # Fallback: simple split like "a.b.c.com" -> subdomain="a.b.c", domain="com?", suffix=""
+        parts = host.split(".")
+        if len(parts) >= 2:
+            domain = parts[-2]
+            suffix = parts[-1]
+            subdomain = ".".join(parts[:-2])
+        else:
+            domain = host
+            suffix = ""
+            subdomain = ""
+        return subdomain.lower(), domain.lower(), suffix.lower()
 
 
 def _subdomain_features(host: str) -> dict:
