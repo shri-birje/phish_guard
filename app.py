@@ -225,15 +225,21 @@ def serve_index():
     return send_from_directory(app.static_folder, "index.html")
 
 
-@app.route("/<path:path>")
-def serve_static(path):
-    # allow loading assets, css, js from web/ root
-    return send_from_directory(app.static_folder, path)
+@app.route("/login")
+def login_page():
+    # this uses templates/login.html
+    return render_template("login.html")
 
 
 @app.route("/assets/<path:filename>")
 def serve_assets(filename):
     return send_from_directory(os.path.join(app.static_folder, "assets"), filename)
+
+
+@app.route("/<path:path>")
+def serve_static(path):
+    # allow loading assets, css, js from web/ root
+    return send_from_directory(app.static_folder, path)
 
 
 # -------------------------
@@ -457,12 +463,6 @@ def api_my_logs():
         for r in rows
     ]
     return jsonify({"ok": True, "logs": logs})
-
-
-# Optional: pretty login page (HTML)
-@app.route("/login")
-def login_page():
-    return render_template("login.html")
 
 
 # -------------------------
