@@ -10,6 +10,7 @@ import datetime
 
 import idna
 import requests
+import tldextract
 
 from modules.unicode_utils import (
     count_zero_width_chars,
@@ -47,6 +48,20 @@ HOMOGLYPH_MAP = {
 }
 
 SUSPICIOUS_TLDS = {".zip", ".top", ".xyz", ".country", ".info", ".icu", ".loan"}
+
+# new: suspicious keywords in subdomains (for phishing-y patterns like login/paypal/etc.)
+SUSPICIOUS_SUBDOMAIN_KEYWORDS = [
+    "login",
+    "secure",
+    "update",
+    "verify",
+    "account",
+    "billing",
+    "support",
+    "security",
+    "confirm",
+]
+
 SAFE_BROWSING_URL = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
 SAFE_BROWSING_KEY = os.environ.get("GOOGLE_SAFEBROWSING_KEY")
 SAFE_BROWSING_CLIENT_ID = os.environ.get("GSB_CLIENT_ID", "phishguard")
@@ -54,7 +69,8 @@ SAFE_BROWSING_CLIENT_VERSION = os.environ.get("GSB_CLIENT_VERSION", "1.0.0")
 SSL_TIMEOUT = float(os.environ.get("SSL_LOOKUP_TIMEOUT", "5"))
 ENABLE_SSL_LOOKUPS = os.environ.get("DISABLE_SSL_LOOKUPS", "0") != "1"
 
-FEATURE_VERSION = 2
+# bumped because we added new features (subdomain_* + brand_in_subdomain_not_domain + is_new_domain)
+FEATURE_VERSION = 3
 
 FEATURE_DEFAULTS = OrderedDict(
     [
@@ -78,6 +94,13 @@ FEATURE_DEFAULTS = OrderedDict(
         ("has_ip", 0.0),
         ("unique_char_ratio", 0.0),
         ("ratio_to_sld", 0.0),
+        # NEW: subdomain features
+        ("num_subdomains", 0.0),
+        ("has_suspicious_subdomain_keyword", 0.0),
+        ("subdomain_length", 0.0),
+        ("subdomain_entropy", 0.0),
+        ("brand_in_subdomain_not_domain", 0.0),
+        # WHOIS / domain age
         ("domain_age_days", -1.0),
         ("domain_age_months", -1.0),
         ("domain_age_years", -1.0),
@@ -86,22 +109,27 @@ FEATURE_DEFAULTS = OrderedDict(
         ("domain_creation_ts", -1.0),
         ("domain_updated_ts", -1.0),
         ("domain_expiry_ts", -1.0),
+        ("is_new_domain", 0.0),
+        # brand similarity / fuzzy
         ("best_sim_trusted_norm", 0.0),
         ("best_sim_trusted_raw", 0.0),
         ("min_lev_trusted", -1.0),
         ("best_fuzzy_ratio", 0.0),
+        # unicode / homoglyph stats
         ("zero_width_char_count", 0.0),
         ("has_zero_width_chars", 0.0),
         ("unicode_script_diversity", 0.0),
         ("has_mixed_scripts", 0.0),
         ("mixed_latin_cyrillic", 0.0),
         ("mixed_latin_greek", 0.0),
+        # Google Safe Browsing
         ("gsb_flagged", 0.0),
         ("gsb_threat_malware", 0.0),
         ("gsb_threat_phishing", 0.0),
         ("gsb_threat_social_engineering", 0.0),
         ("gsb_threat_unwanted_software", 0.0),
         ("gsb_match_count", 0.0),
+        # SSL
         ("ssl_cert_present", 0.0),
         ("ssl_cert_valid", 0.0),
         ("ssl_cert_is_self_signed", 0.0),
@@ -229,6 +257,11 @@ def _asn1_to_dt(raw):
 
 @lru_cache(maxsize=256)
 def _fetch_ssl_metadata(host: str) -> dict:
+    """
+    Fetch SSL metadata for a host using pyOpenSSL.
+
+    Returns {} on any failure, so it never crashes feature extraction.
+    """
     if not ENABLE_SSL_LOOKUPS or not host or crypto is None:
         return {}
     try:
@@ -242,15 +275,26 @@ def _fetch_ssl_metadata(host: str) -> dict:
         cert = crypto.load_certificate(crypto.FILETYPE_ASN1, der_cert)
     except Exception:
         return {}
-    issue = _asn1_to_dt(cert.get_notBefore())
-    expiry = _asn1_to_dt(cert.get_notAfter())
+
+    try:
+        issue = _asn1_to_dt(cert.get_notBefore())
+        expiry = _asn1_to_dt(cert.get_notAfter())
+    except Exception:
+        # If this fails for any reason, treat as no SSL metadata
+        return {}
+
     now = _now()
     validity_period = (expiry - issue).days if issue and expiry else None
     days_to_expire = (expiry - now).days if expiry else None
     issue_age = (now - issue).days if issue else None
+
     subject = cert.get_subject()
     issuer = cert.get_issuer()
-    is_self_signed = subject.get_components() == issuer.get_components()
+    try:
+        is_self_signed = subject.get_components() == issuer.get_components()
+    except Exception:
+        is_self_signed = False
+
     return {
         "issue": issue,
         "expiry": expiry,
@@ -316,9 +360,88 @@ def _script_mix_stats(host: str) -> dict:
     }
 
 
+def _parse_host_parts(host: str):
+    """
+    Use tldextract to split host into (subdomain, domain, suffix).
+    """
+    ext = tldextract.extract(host)
+    return ext.subdomain or "", ext.domain or "", ext.suffix or ""
+
+
+def _subdomain_features(host: str) -> dict:
+    """
+    Compute subdomain-based features:
+
+      - num_subdomains
+      - has_suspicious_subdomain_keyword
+      - subdomain_length
+      - subdomain_entropy
+    """
+    subdomain, _, _ = _parse_host_parts(host)
+    if not subdomain:
+        return {
+            "num_subdomains": 0.0,
+            "has_suspicious_subdomain_keyword": 0.0,
+            "subdomain_length": 0.0,
+            "subdomain_entropy": 0.0,
+        }
+
+    labels = [lbl for lbl in subdomain.split(".") if lbl]
+    num_subdomains = len(labels)
+    lower_sd = subdomain.lower()
+    has_suspicious = any(k in lower_sd for k in SUSPICIOUS_SUBDOMAIN_KEYWORDS)
+    entropy = shannon_entropy(subdomain)
+
+    return {
+        "num_subdomains": float(num_subdomains),
+        "has_suspicious_subdomain_keyword": float(int(has_suspicious)),
+        "subdomain_length": float(len(subdomain)),
+        "subdomain_entropy": float(round(entropy, 4)),
+    }
+
+
+def _brand_mismatch_feature(host: str, trusted_domains: list | None) -> dict:
+    """
+    Detect cases like:
+        paypal.com.login.verify.ru
+    where 'paypal' appears in the subdomain but the registrable domain is not paypal.com.
+
+    Returns:
+        {"brand_in_subdomain_not_domain": 0.0 or 1.0}
+    """
+    if not trusted_domains:
+        return {"brand_in_subdomain_not_domain": 0.0}
+
+    subdomain, domain, suffix = _parse_host_parts(host)
+    if not domain:
+        return {"brand_in_subdomain_not_domain": 0.0}
+
+    registrable = f"{domain}.{suffix}" if suffix else domain
+    sd_lower = subdomain.lower()
+    reg_lower = registrable.lower()
+
+    brands = set()
+    for td in trusted_domains:
+        try:
+            ext = tldextract.extract(td)
+            if ext.domain:
+                brands.add(ext.domain.lower())
+        except Exception:
+            continue
+
+    suspicious = 0
+    for brand in brands:
+        if brand in sd_lower and brand not in reg_lower:
+            suspicious = 1
+            break
+
+    return {"brand_in_subdomain_not_domain": float(suspicious)}
+
+
 def extract_features_from_url(url: str, trusted_domains: list = None, enable_network_enrichment: bool = True) -> dict:
     host = _normalize_host(url)
     parts = host.split(".") if host else [""]
+
     tld = "." + parts[-1] if len(parts) > 1 else ""
     sld = extract_sld(host) if host else ""
     ascii_host = to_ascii(host)
@@ -345,24 +468,42 @@ def extract_features_from_url(url: str, trusted_domains: list = None, enable_net
     feats["unique_char_ratio"] = len(set(host)) / max(1, len(host))
     feats["ratio_to_sld"] = round(len(sld) / max(1, len(host)), 4)
 
+    # subdomain-based lexical features
+    feats.update(_subdomain_features(host))
+
+    # brand mismatch (trusted brand in subdomain, but different registrable domain)
+    feats.update(_brand_mismatch_feature(host, trusted_domains))
+
+    # unicode / script mix
     feats.update(_zero_width_stats(host))
     feats.update(_script_mix_stats(host))
 
+    # WHOIS, SSL, GSB
     if enable_network_enrichment and host:
-        whois_data = _fetch_whois(host)
+        try:
+            whois_data = _fetch_whois(host)
+        except Exception:
+            whois_data = {}
         if whois_data:
             age_days = whois_data.get("age_days")
             if age_days is not None:
                 feats["domain_age_days"] = float(age_days)
                 feats["domain_age_months"] = round(age_days / 30.0, 2)
                 feats["domain_age_years"] = round(age_days / 365.0, 2)
+                feats["is_new_domain"] = 1.0 if age_days < 30 else 0.0
+            else:
+                feats["is_new_domain"] = 0.0
+
             feats["domain_days_until_expiry"] = float(whois_data.get("days_to_expiry", -1) or -1)
             feats["domain_last_updated_days"] = float(whois_data.get("last_updated_days", -1) or -1)
             feats["domain_creation_ts"] = float(whois_data["creation"].timestamp()) if whois_data.get("creation") else -1.0
             feats["domain_updated_ts"] = float(whois_data["updated"].timestamp()) if whois_data.get("updated") else -1.0
             feats["domain_expiry_ts"] = float(whois_data["expiry"].timestamp()) if whois_data.get("expiry") else -1.0
 
-        ssl_meta = _fetch_ssl_metadata(host)
+        try:
+            ssl_meta = _fetch_ssl_metadata(host)
+        except Exception:
+            ssl_meta = {}
         if ssl_meta:
             feats["ssl_cert_present"] = 1.0
             feats["ssl_cert_valid"] = 1.0 if ssl_meta.get("days_to_expire", -1) >= 0 else 0.0
@@ -371,7 +512,10 @@ def extract_features_from_url(url: str, trusted_domains: list = None, enable_net
             feats["ssl_cert_days_to_expire"] = float(ssl_meta.get("days_to_expire", -1) or -1)
             feats["ssl_cert_issue_age_days"] = float(ssl_meta.get("issue_age", -1) or -1)
 
-        gsb = _google_safe_browsing_lookup(url)
+        try:
+            gsb = _google_safe_browsing_lookup(url)
+        except Exception:
+            gsb = {}
         if gsb:
             feats["gsb_flagged"] = float(gsb.get("flagged", 0))
             feats["gsb_match_count"] = float(gsb.get("match_count", 0))
@@ -438,4 +582,3 @@ def extract_features_from_url(url: str, trusted_domains: list = None, enable_net
 
     # ensure ordering
     return OrderedDict((k, feats.get(k, FEATURE_DEFAULTS[k])) for k in FEATURE_DEFAULTS.keys())
-

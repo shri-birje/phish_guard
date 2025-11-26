@@ -15,43 +15,40 @@ from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
-def init_db():
-    conn = sqlite3.connect("phishing_logs.db")
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        url TEXT,
-        prediction INTEGER,
-        probability REAL,
-        homoglyph_score REAL,
-        model_raw_probability REAL,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        features_json TEXT
-    );
-    """)
-    conn.commit()
-    conn.close()
-    print("✔ logs table ensured")
+# -------------------------
+# Import analysis modules
+# -------------------------
+from modules.homoglyph import analyze_homoglyph, fuzzy_confusable_score
+from modules.behavior import analyze_behavior  # per-request human behavior (typing, mouse, etc.)
+from modules.behavior_profile import compute_behavior_profile  # session history profile
+from modules.features import extract_features_from_url, FEATURE_VERSION, FEATURE_DEFAULTS
+from modules.blacklist import (
+    is_blacklisted as file_blacklist_contains,
+    add_to_blacklist as add_domain_to_file_blacklist,
+    remove_from_blacklist as remove_domain_from_file_blacklist,
+)
 
-init_db()
-
-
-# Async mode: prefer gevent (Render / Linux). If unavailable fallback.
+# -------------------------
+# Paths, async mode, app setup
+# -------------------------
 async_mode = os.environ.get("ASYNC_MODE", "gevent")
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "phishing_logs.db")
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "rf_model.joblib")
+ROOT_DIR = os.path.dirname(__file__)
+DB_PATH = os.path.join(ROOT_DIR, "phishing_logs.db")
+MODEL_PATH = os.path.join(ROOT_DIR, "rf_model.joblib")
 
 # Serve static frontend from 'web' directory
 app = Flask(__name__, static_folder="web", static_url_path="")
 allowed_origins = os.environ.get("CORS_ALLOW_ORIGINS", "*")
 cors_origins = [o.strip() for o in allowed_origins.split(",")] if allowed_origins != "*" else "*"
+
 CORS(
     app,
     resources={r"/api/*": {"origins": cors_origins}},
     supports_credentials=True,
     expose_headers=["Authorization"],
 )
+
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "phishguard-final-secret")
 
 socketio = SocketIO(
@@ -73,8 +70,99 @@ API_JWT_SECRET = os.environ.get("API_JWT_SECRET")
 API_JWT_AUDIENCE = os.environ.get("API_JWT_AUDIENCE", "phishguard-api")
 API_JWT_ALGO = os.environ.get("API_JWT_ALGO", "HS256")
 
+
 # -------------------------
-# Load model if present (support model saved as dict{'model','columns'})
+# DB helpers & migrations
+# -------------------------
+def init_db():
+    """
+    Ensure DB exists with the schema expected by api_check() inserts.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            url TEXT,
+            homoglyph_score REAL,
+            behavior_score REAL,
+            phishing_score REAL,
+            risk_level TEXT,
+            features_json TEXT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            url TEXT,
+            level TEXT,
+            message TEXT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS blacklist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT UNIQUE,
+            reason TEXT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+    print("✔ DB & tables ensured at", DB_PATH)
+
+
+def ensure_migrations():
+    """
+    If you ever add extra columns later, you can extend this.
+    For now, logs schema is already correct in init_db().
+    """
+    db = sqlite3.connect(DB_PATH)
+    cur = db.cursor()
+    cur.execute("PRAGMA table_info(logs)")
+    cols = [r[1] for r in cur.fetchall()]
+    # Example: if we ever need to add features_json for old DBs:
+    if "features_json" not in cols:
+        try:
+            cur.execute("ALTER TABLE logs ADD COLUMN features_json TEXT")
+            db.commit()
+            print("✅ Added features_json column to logs table")
+        except Exception as e:
+            print("⚠️ Could not add features_json column:", e)
+    cur.close()
+    db.close()
+
+
+def get_db():
+    db = getattr(g, "_database", None)
+    if db is None:
+        db = g._database = sqlite3.connect(DB_PATH, check_same_thread=False)
+    return db
+
+
+@app.teardown_appcontext
+def close_db(exc):
+    db = getattr(g, "_database", None)
+    if db is not None:
+        db.close()
+
+
+# Initialize DB on startup
+init_db()
+ensure_migrations()
+
+# -------------------------
+# Load model (support dict {'model','columns','feature_version'})
 # -------------------------
 model = None
 model_columns = None
@@ -100,79 +188,12 @@ if os.path.exists(MODEL_PATH):
 else:
     print("⚠️ Model file not found. Run train_model.py to create rf_model.joblib")
 
-if model_feature_version and model_feature_version != FEATURE_VERSION:
+# Warn on feature version mismatch
+if model_feature_version is not None and model_feature_version != FEATURE_VERSION:
     print(
         f"⚠️ Feature version mismatch detected (model={model_feature_version}, runtime={FEATURE_VERSION}). "
         "Please retrain the model to avoid column drift."
     )
-
-# -------------------------
-# DB helpers & migrations
-# -------------------------
-def get_db():
-    db = getattr(g, "_database", None)
-    if db is None:
-        db = g._database = sqlite3.connect(DB_PATH, check_same_thread=False)
-        # enable row factory if needed
-        db.execute(
-            """CREATE TABLE IF NOT EXISTS logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT,
-                url TEXT,
-                homoglyph_score REAL,
-                behavior_score REAL,
-                phishing_score REAL,
-                risk_level TEXT,
-                features_json TEXT,
-                ts DATETIME DEFAULT CURRENT_TIMESTAMP
-            )"""
-        )
-        db.execute(
-            """CREATE TABLE IF NOT EXISTS alerts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT,
-                url TEXT,
-                level TEXT,
-                message TEXT,
-                ts DATETIME DEFAULT CURRENT_TIMESTAMP
-            )"""
-        )
-        db.execute(
-            """CREATE TABLE IF NOT EXISTS blacklist (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                url TEXT UNIQUE,
-                reason TEXT,
-                ts DATETIME DEFAULT CURRENT_TIMESTAMP
-            )"""
-        )
-        db.commit()
-    return db
-
-@app.teardown_appcontext
-def close_db(exc):
-    db = getattr(g, "_database", None)
-    if db is not None:
-        db.close()
-
-# small helper to add missing column (sqlite supports ADD COLUMN)
-def ensure_migrations():
-    db = sqlite3.connect(DB_PATH)
-    cur = db.cursor()
-    # add features_json if not exists (sqlite doesn't offer IF NOT EXISTS for columns)
-    cur.execute("PRAGMA table_info(logs)")
-    cols = [r[1] for r in cur.fetchall()]
-    if "features_json" not in cols:
-        try:
-            cur.execute("ALTER TABLE logs ADD COLUMN features_json TEXT")
-            db.commit()
-            print("✅ Added features_json column to logs table")
-        except Exception as e:
-            print("⚠️ Could not add features_json column:", e)
-    cur.close()
-    db.close()
-
-# run migrations on startup
-ensure_migrations()
 
 # -------------------------
 # Serve frontend
@@ -181,28 +202,21 @@ ensure_migrations()
 def serve_index():
     return send_from_directory(app.static_folder, "index.html")
 
+
 @app.route("/<path:path>")
 def serve_static(path):
     # allow loading assets, css, js from web/ root
     return send_from_directory(app.static_folder, path)
 
+
 @app.route("/assets/<path:filename>")
 def serve_assets(filename):
     return send_from_directory(os.path.join(app.static_folder, "assets"), filename)
 
-# -------------------------
-# Import analysis modules (lazy import to avoid startup errors)
-# -------------------------
-from modules.homoglyph import analyze_homoglyph, fuzzy_confusable_score
-from modules.behavior import analyze_behavior  # keep your existing behavior analyzer
-from modules.features import extract_features_from_url, FEATURE_VERSION, FEATURE_DEFAULTS
-from modules.blacklist import (
-    is_blacklisted as file_blacklist_contains,
-    add_to_blacklist as add_domain_to_file_blacklist,
-    remove_from_blacklist as remove_domain_from_file_blacklist,
-)
 
-
+# -------------------------
+# Helpers
+# -------------------------
 def normalize_domain(url: str) -> str:
     if not url:
         return ""
@@ -227,13 +241,39 @@ def require_jwt(fn):
             return jsonify({"ok": False, "error": "missing bearer token"}), 401
         token = auth_header.split(" ", 1)[1].strip()
         try:
-            payload = jwt.decode(token, API_JWT_SECRET, algorithms=[API_JWT_ALGO], audience=API_JWT_AUDIENCE)
+            payload = jwt.decode(
+                token,
+                API_JWT_SECRET,
+                algorithms=[API_JWT_ALGO],
+                audience=API_JWT_AUDIENCE,
+            )
             g.jwt_payload = payload
         except jwt.PyJWTError as exc:
             return jsonify({"ok": False, "error": f"invalid token: {exc}"}), 401
         return fn(*args, **kwargs)
 
     return wrapper
+
+
+def get_user_id_from_request(data: dict) -> str:
+    """
+    Option B: client sends its own user_id.
+
+    We support:
+      - JSON body: data["user_id"] (preferred)
+      - JSON body: data["session_id"] (fallback)
+      - Header:    X-User-Id
+      - Fallback:  remote_addr
+    """
+    user_id = (
+        data.get("user_id")
+        or data.get("session_id")
+        or request.headers.get("X-User-Id")
+        or request.remote_addr
+        or "anonymous"
+    )
+    return str(user_id)
+
 
 # -------------------------
 # API: Check URL
@@ -243,26 +283,26 @@ def require_jwt(fn):
 def api_check():
     data = request.json or {}
     url = data.get("url", "")
-    behavior = data.get("behavior", {})
+    behavior_raw = data.get("behavior", {}) or {}
+    user_id = get_user_id_from_request(data)
 
     # load trusted domains
     trusted = []
-    trusted_path = os.path.join(os.path.dirname(__file__), "trusted_domains.txt")
+    trusted_path = os.path.join(ROOT_DIR, "trusted_domains.txt")
     try:
         with open(trusted_path, "r", encoding="utf-8") as f:
             trusted = [x.strip() for x in f if x.strip()]
     except Exception:
         trusted = []
 
+    # DB connection (for behavior profile + logging)
+    db = get_db()
+
+    # --- Homoglyph and fuzzy confusable scores ---
     try:
         homoglyph_score = analyze_homoglyph(url, trusted)
     except Exception:
         homoglyph_score = 0.0
-
-    try:
-        behavior_score = analyze_behavior(behavior)
-    except Exception:
-        behavior_score = 0.0
 
     try:
         fuzzy_score = fuzzy_confusable_score(url, trusted)
@@ -270,24 +310,53 @@ def api_check():
         fuzzy_score = 0.0
 
     glyph_score = min(100.0, max(0.0, homoglyph_score))
-    behavior_pct = min(100.0, max(0.0, behavior_score))
     fuzzy_pct = min(100.0, max(0.0, fuzzy_score))
 
+    # --- Per-request human behavior score (typing, mouse, scroll, etc.) ---
     try:
-        base_features = extract_features_from_url(url, trusted_domains=trusted, enable_network_enrichment=True)
+        micro_behavior_score = analyze_behavior(behavior_raw)
+    except Exception:
+        micro_behavior_score = 0.0
+    micro_behavior_pct = min(100.0, max(0.0, micro_behavior_score))
+
+    # --- Session-based behavior profile (history of this user_id) ---
+    behavior_history_pct = 0.0
+    behavior_profile_info = {}
+    try:
+        behavior_profile_info = compute_behavior_profile(db, user_id, lookback_minutes=60)
+        behavior_risk = float(behavior_profile_info.get("behavior_risk", 0.0))
+        behavior_history_pct = min(100.0, max(0.0, behavior_risk * 100.0))
+    except Exception as e:
+        print("[WARN] behavior_profile error:", e)
+        behavior_history_pct = 0.0
+
+    # Combine micro + history into one behavior_pct
+    # Now: 80% micro, 20% history (less aggressive)
+    behavior_pct = 0.8 * micro_behavior_pct + 0.2 * behavior_history_pct
+    behavior_pct = min(100.0, max(0.0, behavior_pct))
+
+    # --- Feature extraction for ML ---
+    try:
+        base_features = extract_features_from_url(
+            url,
+            trusted_domains=trusted,
+            enable_network_enrichment=True,
+        )
     except Exception as exc:
         print("[WARN] feature extraction error:", exc)
         base_features = dict(FEATURE_DEFAULTS)
 
     features = dict(base_features)
+
     phishing_score = None
     prediction = None
 
+    # --- ML model inference & blending ---
     if model:
         try:
             X_df = pd.DataFrame([base_features]).fillna(0)
 
-            # align to training columns if available
+            # Align to training columns if available
             if model_columns:
                 for c in model_columns:
                     if c not in X_df.columns:
@@ -302,39 +371,62 @@ def api_check():
                 probability = float(proba[1])
 
             ml_score = probability * 100.0
+
             # Blend ML probability with heuristic signals
+            # Now: ML stronger, behavior softer
             phishing_score = round(
-                (ml_score * 0.6)
-                + (glyph_score * 0.2)
-                + (fuzzy_pct * 0.15)
+                (ml_score * 0.7)
+                + (glyph_score * 0.15)
+                + (fuzzy_pct * 0.1)
                 + (behavior_pct * 0.05),
                 2,
             )
             prediction = int(model.predict(X_df)[0])
-            # include debug log
+
             print(
-                f"[DEBUG] ML prob={probability:.4f} | glyph={glyph_score:.2f} | fuzzy={fuzzy_pct:.2f} | behavior={behavior_pct:.2f} | blended={phishing_score}%"
+                f"[DEBUG] user_id={user_id} | ML prob={probability:.4f} | glyph={glyph_score:.2f} | "
+                f"fuzzy={fuzzy_pct:.2f} | behavior={behavior_pct:.2f} | blended={phishing_score}%"
             )
-            features["model_raw_probability"] = probability
+            features["model_raw_probability"] = float(probability)
         except Exception as e:
             print("[WARN] model inference error:", e)
             traceback.print_exc()
-            phishing_score = round(0.5 * glyph_score + 0.35 * fuzzy_pct + 0.15 * behavior_pct, 2)
+            phishing_score = round(
+                0.5 * glyph_score + 0.35 * fuzzy_pct + 0.15 * behavior_pct,
+                2,
+            )
             prediction = 1 if phishing_score >= 50 else 0
     else:
-        phishing_score = round(0.5 * glyph_score + 0.35 * fuzzy_pct + 0.15 * behavior_pct, 2)
+        # No model: fall back to heuristic blend
+        phishing_score = round(
+            0.5 * glyph_score + 0.35 * fuzzy_pct + 0.15 * behavior_pct,
+            2,
+        )
         prediction = 1 if phishing_score >= 50 else 0
 
-    # classification
-    if phishing_score < 30:
+    # Extra logic using model probability + brand mismatch
+    prob = features.get("model_raw_probability", 0.0)
+    brand_mismatch = features.get("brand_in_subdomain_not_domain", 0.0)
+
+    # 1) Very strong model confidence but blended score too low → bump it
+    if prob >= 0.95 and phishing_score < 70:
+        phishing_score = max(phishing_score, 80.0)
+
+    # 2) Brand misused in subdomain with decent model prob → bump to High
+    #    (lowered threshold: prob >= 0.6)
+    if brand_mismatch >= 1.0 and prob >= 0.6:
+        phishing_score = max(phishing_score, 85.0)
+
+    # --- Classification into risk levels (relaxed thresholds) ---
+    if phishing_score < 40:
         risk, action = "Low", "Allow"
-    elif phishing_score < 70:
+    elif phishing_score < 75:
         risk, action = "Medium", "Warn"
     else:
         risk, action = "High", "Block"
 
+    # --- Blacklist enforcement ---
     normalized_domain = normalize_domain(url)
-    db = get_db()
     blacklisted = False
     if normalized_domain:
         try:
@@ -352,16 +444,22 @@ def api_check():
         risk, action = "High", "Block"
         prediction = 1
 
-    # Save to DB (store features JSON for retraining)
+    # --- Save to DB (store features JSON for retraining + behavior history) ---
     try:
         db.execute(
-            "INSERT INTO logs (session_id, url, homoglyph_score, behavior_score, phishing_score, risk_level, features_json, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            """
+            INSERT INTO logs (
+                session_id, url, homoglyph_score, behavior_score,
+                phishing_score, risk_level, features_json, ts
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
             (
-                "static",
+                user_id,
                 url,
-                homoglyph_score,
-                behavior_score,
-                phishing_score,
+                float(homoglyph_score),
+                float(behavior_pct),
+                float(phishing_score),
                 risk,
                 json.dumps(features),
                 datetime.datetime.utcnow().isoformat(),
@@ -374,24 +472,38 @@ def api_check():
     if risk in ("Medium", "High"):
         try:
             db.execute(
-                "INSERT INTO alerts (session_id, url, level, message, ts) VALUES (?, ?, ?, ?, ?)",
-                ("static", url, risk, f"{risk} risk detected for {url}", datetime.datetime.utcnow().isoformat()),
+                """
+                INSERT INTO alerts (session_id, url, level, message, ts)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    url,
+                    risk,
+                    f"{risk} risk detected for {url}",
+                    datetime.datetime.utcnow().isoformat(),
+                ),
             )
             db.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            print("DB alert insert error:", e)
 
     return jsonify(
         {
             "url": url,
+            "user_id": user_id,
             "homoglyph_score": round(homoglyph_score, 2),
-            "behavior_score": round(behavior_score, 2),
+            "behavior_score_micro": round(micro_behavior_pct, 2),
+            "behavior_score_history": round(behavior_history_pct, 2),
+            "behavior_score_combined": round(behavior_pct, 2),
             "phishing_score": phishing_score,
             "risk_level": risk,
             "action": action,
             "features": features,
+            "behavior_profile": behavior_profile_info,
         }
     )
+
 
 # -------------------------
 # API: Block / Unblock URL (blacklist)
@@ -418,6 +530,7 @@ def api_block():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+
 @app.route("/api/unblock", methods=["POST"])
 @require_jwt
 @limiter.limit(ADMIN_RATE_LIMIT)
@@ -436,6 +549,7 @@ def api_unblock():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+
 @app.route("/api/blacklist")
 @require_jwt
 @limiter.limit(ADMIN_RATE_LIMIT)
@@ -445,8 +559,9 @@ def api_blacklist():
     rows = cur.fetchall()
     return jsonify({"blacklist": [list(r) for r in rows]})
 
+
 # -------------------------
-# Optional debug endpoint to inspect features (helps debugging on Render)
+# Optional debug endpoint to inspect features
 # -------------------------
 @app.route("/api/debug_features", methods=["POST"])
 @require_jwt
@@ -456,15 +571,17 @@ def api_debug_features():
     url = data.get("url", "")
     include_network = bool(data.get("include_network_signals", True))
     trusted = []
-    trusted_path = os.path.join(os.path.dirname(__file__), "trusted_domains.txt")
+    trusted_path = os.path.join(ROOT_DIR, "trusted_domains.txt")
     try:
         with open(trusted_path, "r", encoding="utf-8") as f:
             trusted = [x.strip() for x in f if x.strip()]
     except Exception:
         trusted = []
-    features = extract_features_from_url(url, trusted_domains=trusted, enable_network_enrichment=include_network)
-    model_present = model is not None
-    model_cols_present = model_columns is not None
+    features = extract_features_from_url(
+        url,
+        trusted_domains=trusted,
+        enable_network_enrichment=include_network,
+    )
     proba = None
     prob_class1 = None
     try:
@@ -475,8 +592,9 @@ def api_debug_features():
                     if c not in X_df.columns:
                         X_df[c] = 0.0
                 X_df = X_df[model_columns]
-            proba = model.predict_proba(X_df)[0].tolist()
-            prob_class1 = float(proba[1]) if len(proba) > 1 else None
+            proba_arr = model.predict_proba(X_df)[0]
+            proba = proba_arr.tolist()
+            prob_class1 = float(proba_arr[1]) if len(proba_arr) > 1 else None
     except Exception as e:
         proba = str(e)
     return jsonify(
@@ -492,6 +610,7 @@ def api_debug_features():
         }
     )
 
+
 # -------------------------
 # SocketIO (kept minimal)
 # -------------------------
@@ -499,11 +618,13 @@ def api_debug_features():
 def on_connect():
     emit("connected", {"msg": "connected", "session_id": request.sid})
 
+
 @socketio.on("join")
 def on_join(data):
     room = data.get("room") or request.sid
     join_room(room)
     emit("joined", {"room": room}, room=request.sid)
+
 
 # -------------------------
 # Run app

@@ -8,3 +8,6 @@ linkedin.com
 wikipedia.org
 github.com
 apple.com
+paypal.com
+whatsapp.com
+netflix.com

@@ -78,9 +78,15 @@ PHISHING_FALLBACK = [
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train phishing detection model with enriched features.")
+    parser = argparse.ArgumentParser(
+        description="Train phishing detection model with enriched homoglyph + URL + WHOIS + SSL + subdomain features."
+    )
     parser.add_argument("--model-type", choices=["rf", "xgboost", "lightgbm"], default="rf")
-    parser.add_argument("--refresh-feeds", action="store_true", help="Rebuild dataset from open-source feeds.")
+    parser.add_argument(
+        "--refresh-feeds",
+        action="store_true",
+        help="Rebuild dataset from open-source feeds into data/labeled_urls.csv (overwrites).",
+    )
     parser.add_argument(
         "--max-feed-samples",
         type=int,
@@ -229,6 +235,7 @@ def load_dataset(refresh: bool, max_samples: int) -> pd.DataFrame:
 def balance_dataset(df: pd.DataFrame) -> pd.DataFrame:
     counts = df["label"].value_counts()
     if len(counts) < 2:
+        print("⚠️ Dataset has a single class only; skipping balancing.")
         return df
     min_count = counts.min()
     balanced = (
@@ -251,19 +258,33 @@ def load_trusted_domains() -> List[str]:
 def extract_all_features(df: pd.DataFrame, enable_network: bool = True) -> pd.DataFrame:
     trusted = load_trusted_domains()
     rows = []
-    print(f"🔍 Extracting features for {len(df)} URLs (network_enrichment={enable_network})...")
+    print(
+        f"🔍 Extracting features for {len(df)} URLs "
+        f"(network_enrichment={'ON' if enable_network else 'OFF'}, FEATURE_VERSION={FEATURE_VERSION})..."
+    )
     for url, label in zip(df["url"], df["label"]):
         try:
-            feats = extract_features_from_url(url, trusted_domains=trusted, enable_network_enrichment=enable_network)
+            feats = extract_features_from_url(
+                url,
+                trusted_domains=trusted,
+                enable_network_enrichment=enable_network,
+            )
             feats["label"] = int(label)
             feats["url"] = url
             rows.append(feats)
         except Exception as exc:
             print(f"[WARN] feature extraction failed for {url}: {exc}")
     feature_df = pd.DataFrame(rows).fillna(0)
+
+    # Ensure we only keep the features defined in FEATURE_DEFAULTS, in the correct order
     ordered_cols = list(FEATURE_DEFAULTS.keys())
     feature_cols = [col for col in ordered_cols if col in feature_df.columns]
+    missing = [c for c in ordered_cols if c not in feature_df.columns]
+    if missing:
+        print(f"⚠️ Warning: missing {len(missing)} expected features: {missing[:8]}...")
+
     feature_df = feature_df[feature_cols + ["label", "url"]]
+    print(f"✅ Final feature matrix shape: {feature_df.shape} (features={len(feature_cols)})")
     return feature_df
 
 
@@ -296,27 +317,41 @@ def build_model(model_type: str):
                 class_weight="balanced",
                 random_state=42,
             )
+    # Default: RandomForest (rf)
     return RandomForestClassifier(
         n_estimators=400,
         max_depth=None,
         random_state=42,
+        n_jobs=-1,
         class_weight="balanced_subsample",
     )
 
 
 def train_and_save(feature_df: pd.DataFrame, model_type: str):
+    # Separate features vs label/url
     X = feature_df.drop(columns=["label", "url"], errors="ignore")
     y = feature_df["label"]
+
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y if len(set(y)) > 1 else None
+        X,
+        y,
+        test_size=0.2,
+        random_state=42,
+        stratify=y if len(set(y)) > 1 else None,
     )
+
     model = build_model(model_type)
     print(f"📈 Training {model.__class__.__name__} on {X_train.shape[1]} features...")
     model.fit(X_train, y_train)
+
     y_pred = model.predict(X_test)
     try:
-        y_prob = model.predict_proba(X_test)[:, 1]
-        auc = roc_auc_score(y_test, y_prob)
+        if hasattr(model, "predict_proba"):
+            y_prob = model.predict_proba(X_test)[:, 1]
+            auc = roc_auc_score(y_test, y_prob)
+        else:
+            y_prob = None
+            auc = None
     except Exception:
         y_prob = None
         auc = None
@@ -326,9 +361,14 @@ def train_and_save(feature_df: pd.DataFrame, model_type: str):
         print("✅ ROC-AUC:", round(auc, 4))
     print(classification_report(y_test, y_pred, digits=3))
 
-    artifact = {"model": model, "columns": list(X.columns), "feature_version": FEATURE_VERSION}
+    artifact = {
+        "model": model,
+        "columns": list(X.columns),
+        "feature_version": FEATURE_VERSION,
+    }
     joblib.dump(artifact, MODEL_PATH)
     print(f"💾 Saved model ({model.__class__.__name__}) to {MODEL_PATH}")
+    print("ℹ️ Columns used:", len(artifact["columns"]), "FEATURE_VERSION:", FEATURE_VERSION)
 
 
 def main():
