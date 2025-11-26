@@ -1,13 +1,21 @@
-// web/script.js
-const API_BASE = (typeof API_BASE_OVERRIDE !== 'undefined') ? API_BASE_OVERRIDE : window.location.origin;
+const API_BASE = (typeof API_BASE_OVERRIDE !== 'undefined')
+  ? API_BASE_OVERRIDE
+  : window.location.origin;
 
-const urlInput = document.getElementById('urlInput');
-const resultBox = document.getElementById('result');
+const urlInput   = document.getElementById('urlInput');
+const resultBox  = document.getElementById('result');
 const analyzeBtn = document.getElementById('analyzeBtn');
-const blockBtn = document.getElementById('blockBtn');
+const blockBtn   = document.getElementById('blockBtn');
 
-function showResult(text, color='neutral') {
-  resultBox.style.background = (color === 'danger') ? 'rgba(255, 0, 0, 0.35)' : (color === 'warn' ? 'rgba(255,165,0,0.25)' : 'rgba(0,128,0,0.4)');
+function showResult(text, color = 'neutral') {
+  if (color === 'danger') {
+    resultBox.style.background = 'rgba(255, 0, 0, 0.35)';
+  } else if (color === 'warn') {
+    resultBox.style.background = 'rgba(255,165,0,0.25)';
+  } else {
+    // safe / neutral
+    resultBox.style.background = 'rgba(0,128,0,0.4)';
+  }
   resultBox.textContent = text;
 }
 
@@ -17,37 +25,62 @@ async function checkPhishing() {
     showResult("⚠️ Please enter a URL.", 'warn');
     return;
   }
+
   showResult("🔍 Analyzing...", 'warn');
   blockBtn.style.display = 'none';
+
   try {
     const resp = await fetch(`${API_BASE}/api/check`, {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({url})
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
     });
+
     if (!resp.ok) {
       const txt = await resp.text();
       showResult("❌ Server error: " + resp.status + " " + txt, 'danger');
       return;
     }
+
     const data = await resp.json();
-    const score = data.phishing_score;
-    if (score === null || typeof score === 'undefined') {
-      showResult("❌ No score returned", 'danger');
-      return;
+
+    // Use backend classification instead of showing raw percentage
+    const risk   = data.risk_level;   // "Low", "Medium", "High"
+    const action = data.action;       // "Allow", "Warn", "Block"
+    // const score = data.phishing_score; // available, but we DON'T display it
+
+    let icon   = "";
+    let msg    = "";
+    let color  = "neutral";
+
+    if (risk === "Low") {
+      icon  = "✅";
+      msg   = `Safe. The URL "${url}" does not show obvious phishing signals.`;
+      color = "safe";
+    } else if (risk === "Medium") {
+      icon  = "⚠️";
+      msg   = `Suspicious. Proceed carefully when using "${url}".`;
+      color = "warn";
+    } else if (risk === "High") {
+      icon  = "🚫";
+      msg   = `Dangerous. "${url}" is likely phishing. Do NOT enter any sensitive information.`;
+      color = "danger";
+    } else {
+      icon  = "ℹ️";
+      msg   = `Unknown risk level for "${url}".`;
+      color = "warn";
     }
-    if (score >= 70) {
-      showResult(`🚨 Phishing likely (${score}%). The URL "${url}" is risky.`, 'danger');
-      blockBtn.style.display = 'inline-block';
-      blockBtn.onclick = () => blockUrl(url);
-    } else if (score >= 30) {
-      showResult(`⚠️ Suspicious (${score}%). Proceed carefully.`, 'warn');
+
+    showResult(`${icon} ${msg}`, color);
+
+    // Show block button only for Medium / High risk
+    if (risk === "Medium" || risk === "High") {
       blockBtn.style.display = 'inline-block';
       blockBtn.onclick = () => blockUrl(url);
     } else {
-      showResult(`✅ Safe! The URL "${url}" appears legitimate. (${score}%)`, 'safe');
       blockBtn.style.display = 'none';
     }
+
   } catch (err) {
     console.error(err);
     showResult("❌ Error: Unable to contact backend. Is the server reachable?", 'danger');
@@ -59,8 +92,8 @@ async function blockUrl(url) {
   try {
     const resp = await fetch(`${API_BASE}/api/block`, {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({url, reason: 'blocked via web UI'})
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, reason: 'blocked via web UI' })
     });
     const data = await resp.json();
     if (data.ok) {
@@ -75,4 +108,6 @@ async function blockUrl(url) {
 }
 
 analyzeBtn.addEventListener('click', checkPhishing);
-urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') checkPhishing(); });
+urlInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') checkPhishing();
+});
