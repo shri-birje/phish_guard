@@ -4,7 +4,7 @@
   "webDir": "web",
   "bundledWebRuntime": false,
   "server": {
-    "url": "https://phish-guard-3uvw.onrender.com",
+    "url": "https://phish-guard-85bx.onrender.com",
     "cleartext": true
   }
 }
