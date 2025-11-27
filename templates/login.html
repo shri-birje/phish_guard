@@ -147,7 +147,6 @@
     const form = document.getElementById("auth-form");
     const statusEl = document.getElementById("status");
     const submitBtn = document.getElementById("submit-btn");
-    const toggleLink = document.getElementById("toggle-link");
     const toggleText = document.getElementById("toggle-text");
     const modeInput = document.getElementById("mode");
 
@@ -166,9 +165,13 @@
       };
     }
 
-    toggleLink.onclick = () => {
-      setMode("register");
-    };
+    // Initial toggle link attach
+    document.addEventListener("DOMContentLoaded", () => {
+      const tl = document.getElementById("toggle-link");
+      if (tl) {
+        tl.onclick = () => setMode("register");
+      }
+    });
 
     async function callApi(path, body) {
       const resp = await fetch(path, {
@@ -208,7 +211,7 @@
           localStorage.setItem("phishguard_email", result.email || email);
         }
 
-        // Redirect back to main search UI after short delay
+        // ✅ After login, go to main UI (/)
         setTimeout(() => {
           window.location.href = "/";
         }, 600);

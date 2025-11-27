@@ -137,3 +137,20 @@ analyzeBtn.addEventListener('click', checkPhishing);
 urlInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') checkPhishing();
 });
+
+// 🛡️ Dashboard dropdown toggle logic
+(function() {
+  const root = document.querySelector(".pg-dashboard");
+  if (!root) return;
+  const btn = root.querySelector(".pg-dashboard-btn");
+
+  btn.addEventListener("click", () => {
+    root.classList.toggle("open");
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!root.contains(e.target)) {
+      root.classList.remove("open");
+    }
+  });
+})();
