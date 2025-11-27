@@ -1,15 +1,13 @@
 <!doctype html>
 <html lang="en">
+
 <head>
   <meta charset="utf-8">
   <title>PhishGuard Login</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
   <!-- Bootstrap (CDN) -->
-  <link
-    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
-    rel="stylesheet"
-  >
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
 
   <style>
     :root {
@@ -51,44 +49,23 @@
     }
 
     .brand-logo {
-      width: 64px;
-      height: 64px;
-      border-radius: 999px;
-      background: radial-gradient(circle at 30% 20%, #38bdf8, #0f172a 60%);
+      width: 80px;
+      height: 80px;
+      border-radius: 18px;          /* rounded corners, not a circle */
+      background-color: #020617;    /* subtle dark background */
       display: flex;
       align-items: center;
       justify-content: center;
       overflow: hidden;
-      margin: 0 auto 0.5rem auto;
-      box-shadow: 0 12px 30px rgba(56, 189, 248, 0.45);
+      margin: 0 auto 0.75rem auto;
+      box-shadow: 0 16px 40px rgba(15, 23, 42, 0.9);
     }
 
     .brand-logo img {
-      width: 52px;
-      height: 52px;
+      width: 100%;
+      height: 100%;
       object-fit: contain;
-      filter: drop-shadow(0 3px 8px rgba(15, 23, 42, 0.8));
-    }
-
-    .brand-pill {
-      background: linear-gradient(135deg, var(--accent2), var(--accent));
-      border-radius: 999px;
-      padding: 0.3rem 0.9rem;
-      font-size: 0.72rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: .14em;
-      display: inline-flex;
-      align-items: center;
-      gap: .45rem;
-      color: #020617;
-    }
-
-    .brand-pill span.dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 999px;
-      background: rgba(15, 23, 42, 0.22);
+      border-radius: inherit;       /* matches the parent rounding */
     }
 
     .subtitle {
@@ -155,6 +132,7 @@
       color: #38bdf8;
       cursor: pointer;
     }
+
     .link:hover {
       text-decoration: underline;
     }
@@ -162,6 +140,7 @@
     .password-wrapper {
       position: relative;
     }
+
     .password-toggle {
       position: absolute;
       right: 0.85rem;
@@ -176,9 +155,11 @@
       align-items: center;
       justify-content: center;
     }
+
     .password-toggle:hover {
       color: #e5e7eb;
     }
+
     .password-toggle-icon {
       font-size: 1.1rem;
       line-height: 1;
@@ -192,6 +173,7 @@
     }
   </style>
 </head>
+
 <body>
   <div class="container px-3">
     <div class="row justify-content-center">
@@ -202,10 +184,7 @@
               <!-- Make sure this file exists at web/phishguard-logo.png -->
               <img src="/assets/logo.png" alt="PhishGuard logo">
             </div>
-            <div class="brand-pill mb-2">
-              <span class="dot"></span>
-              <span>PHISHGUARD</span>
-            </div>
+          
             <h1 class="h4 mb-1">Welcome back</h1>
             <p class="subtitle mb-0">
               Sign in to see your phishing checks and behavior profile.
@@ -217,19 +196,16 @@
 
             <div class="mb-3">
               <label for="email" class="input-label mb-1">Email</label>
-              <input type="email" class="form-control form-control-lg" id="email"
-                     placeholder="you@example.com" required>
+              <input type="email" class="form-control form-control-lg" id="email" placeholder="you@example.com"
+                required>
             </div>
 
             <div class="mb-2">
               <label for="password" class="input-label mb-1">Password</label>
               <div class="password-wrapper">
-                <input type="password" class="form-control form-control-lg" id="password"
-                       placeholder="••••••••" minlength="6" required>
-                <button type="button"
-                        class="password-toggle"
-                        id="password-toggle"
-                        aria-label="Show password briefly">
+                <input type="password" class="form-control form-control-lg" id="password" placeholder="••••••••"
+                  minlength="6" required>
+                <button type="button" class="password-toggle" id="password-toggle" aria-label="Show password briefly">
                   <span class="password-toggle-icon" id="password-icon">👁</span>
                 </button>
               </div>
@@ -359,4 +335,5 @@
     });
   </script>
 </body>
+
 </html>
