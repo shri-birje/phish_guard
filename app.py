@@ -17,9 +17,9 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.security import generate_password_hash, check_password_hash  # NEW: password hashing
 
-# -------------------------
+
 # Import analysis modules
-# -------------------------
+
 from modules.homoglyph import analyze_homoglyph, fuzzy_confusable_score
 from modules.behavior import analyze_behavior  # per-request human behavior (typing, mouse, etc.)
 from modules.behavior_profile import compute_behavior_profile  # session history profile
@@ -30,9 +30,9 @@ from modules.blacklist import (
     remove_from_blacklist as remove_domain_from_file_blacklist,
 )
 
-# -------------------------
+
 # Paths, async mode, app setup
-# -------------------------
+
 async_mode = os.environ.get("ASYNC_MODE", "gevent")
 
 ROOT_DIR = os.path.dirname(__file__)
